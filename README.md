@@ -52,8 +52,14 @@ The project includes several AI agents for different purposes:
 # Activate virtual environment
 source .venv/bin/activate
 
-# Run the main agent pipeline
+# Run the main agent pipeline (sequential)
 python main.py
+
+# Run the workflow (conditional with validation)
+python workflow.py
+
+# Generate workflow visualization
+python visualize_workflow.py
 
 # Run individual agents
 python -m agents.filesystem_agent
@@ -67,9 +73,23 @@ The project includes several specialized AI agents that work together:
 
 1. **K8s Task Idea Agent** - Generates unique Kubernetes concepts with progressive difficulty (Beginner/Intermediate/Advanced)
 2. **K8s Task Generator Agent** - Creates complete task scaffolding with templates, tests, and validation
-3. **Filesystem Agent** - Handles file operations via MCP filesystem server
-4. **Kubernetes Agent** - Executes kubectl commands against K8s clusters
-5. **PyTest Agent** - Runs and validates test suites
+3. **K8s Task Validator Agent** - Validates task structure, YAML syntax, Python syntax, and Jinja templates
+4. **PyTest Agent** - Runs and validates test suites
+5. **Filesystem Agent** - Handles file operations via MCP filesystem server
+6. **Kubernetes Agent** - Executes kubectl commands against K8s clusters
+
+### Workflows
+
+The project supports two execution modes:
+
+1. **main.py** - Sequential pipeline (idea → generate → test)
+2. **workflow.py** - Conditional workflow with validation and automatic cleanup
+
+See [WORKFLOW.md](WORKFLOW.md) for detailed workflow documentation including:
+- Workflow architecture and visualization
+- Conditional logic and decision making
+- Structured output models
+- Executor naming conventions
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed technical documentation on agent logic, workflows, and system design.
 
@@ -101,13 +121,26 @@ k8s-game-rule-builder/
    bash setup.sh
    ```
 
-2. **Run the agent pipeline:**
+2. **Run the sequential pipeline:**
    ```bash
    source .venv/bin/activate
    python main.py
    ```
 
-3. **Generate task ideas:**
+3. **Run the conditional workflow (with validation):**
+   ```bash
+   source .venv/bin/activate
+   python workflow.py
+   ```
+
+4. **Generate workflow visualization:**
+   ```bash
+   source .venv/bin/activate
+   python visualize_workflow.py
+   # Creates: workflow_graph.svg, workflow_graph.png, workflow_graph.pdf
+   ```
+
+5. **Generate task ideas:**
    ```bash
    python -m agents.k8s_task_idea_agent
    ```
@@ -115,6 +148,12 @@ k8s-game-rule-builder/
 ## Documentation
 
 - **README.md** (this file) - Quick start and overview
+- **[WORKFLOW.md](WORKFLOW.md)** - Workflow documentation including:
+  - Conditional workflow architecture
+  - Workflow visualization (Mermaid, SVG, PNG, PDF)
+  - Structured output models
+  - Executor naming conventions
+  - Comparison with sequential pipeline
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Complete technical documentation including:
   - Agent architecture and workflows
   - Template system and validation patterns
