@@ -40,3 +40,5 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
+task_ideas_memory.json
+task_ideas_thread.json
