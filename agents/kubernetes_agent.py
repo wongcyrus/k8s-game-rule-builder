@@ -7,6 +7,7 @@ from typing import Annotated
 from pydantic import Field
 from agent_framework.azure import AzureOpenAIResponsesClient
 from azure.identity import AzureCliCredential
+from .logging_middleware import LoggingFunctionMiddleware
 
 logging.basicConfig(level=logging.INFO)
 
@@ -57,6 +58,7 @@ def get_kubernetes_agent():
         ),
         tools=[run_kubectl_command],
         tool_choice="required",
+        middleware=[LoggingFunctionMiddleware()],
     )
     
     return agent

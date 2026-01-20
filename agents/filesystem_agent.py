@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from agent_framework import MCPStdioTool
 from agent_framework.azure import AzureOpenAIResponsesClient
 from azure.identity import AzureCliCredential
+from .logging_middleware import LoggingFunctionMiddleware
 
 logging.basicConfig(level=logging.INFO)
 
@@ -42,6 +43,7 @@ async def get_filesystem_agent():
             ),
             tools=mcp_tool,
             tool_choice="required",
+            middleware=[LoggingFunctionMiddleware()],
         )
         
         yield agent

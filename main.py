@@ -6,6 +6,7 @@ from agents import (
     get_kubernetes_agent,
     get_pytest_agent,
     get_k8s_task_generator_agent,
+    get_k8s_task_idea_agent,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -41,16 +42,34 @@ async def main():
 
     
     logging.info("\n" + "="*60)
+    logging.info("Running K8s Task Idea Agent (with Memory)")
+    logging.info("="*60)
+    
+    # Get task idea agent with memory to generate unique ideas
+    async with get_k8s_task_idea_agent() as (idea_agent, idea_memory):
+        # Generate a unique task idea
+        idea_result = await idea_agent.run(
+            "Based on the Kubernetes documentation, suggest a new and unique task idea "
+            "for teaching Kubernetes concepts. Format as 'Task: ###_concept_name'"
+        )
+        logging.info("\n=== K8s Task Idea Agent Result ===")
+        logging.info(idea_result.text)
+        
+        # Extract task name from idea result for the generator
+        task_name = "001_create_service"  # Default fallback
+        if "Task:" in idea_result.text:
+            task_name = idea_result.text.split("Task:")[1].split("\n")[0].strip()
+    
+    logging.info("\n" + "="*60)
     logging.info("Running K8s Task Generator Agent")
     logging.info("="*60)
     
-    # Get task generator agent and create a sample task
+    # Get task generator agent and create a task from the generated idea
     async with get_k8s_task_generator_agent() as task_gen_agent:
         task_result = await task_gen_agent.run(
-            "Generate a beginner-level task for creating a Kubernetes Service. "
-            "The task should be named '080_create_service' and teach users how to create a "
-            "ClusterIP service that exposes a deployment. Include template variables for "
-            "namespace and service name."
+            f"Generate a beginner-level Kubernetes task based on this idea: {task_name}. "
+            f"Create appropriate instruction.md, session.json, setup.template.yaml, and answer.template.yaml. "
+            f"Include template variables and validation tests."
         )
         logging.info("\n=== K8s Task Generator Agent Result ===")
         logging.info(task_result.text)
@@ -62,7 +81,7 @@ async def main():
     # Get pytest agent and run tests
     pytest_agent = get_pytest_agent()
     pytest_result = await pytest_agent.run(
-        "pytest --import-mode=importlib --rootdir=. tests/game02/080_create_service/"
+        "Run test in tests/game02/001_create_service/"
     )
     logging.info("\n=== PyTest Agent Result ===")
     logging.info(pytest_result.text)
