@@ -1,13 +1,15 @@
 # K8s Game Rule Builder
 
-A Python project for building Kubernetes learning game rules using AI agents powered by the Model Context Protocol (MCP).
+A Python project for building Kubernetes learning game rules using AI agents powered by Azure OpenAI and the Model Context Protocol (MCP).
 
 ## Features
 
-- **AI-Powered Task Generation**: Uses Azure OpenAI agents to generate Kubernetes learning tasks
-- **MCP Integration**: Leverages the official [Model Context Protocol filesystem server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) for file operations
+- **AI-Powered Task Generation**: Uses Azure OpenAI agents to generate progressive Kubernetes learning tasks (Beginner → Intermediate → Advanced)
+- **Intelligent Memory System**: Prevents duplicate content generation across sessions
+- **MCP Integration**: Leverages the official [Model Context Protocol filesystem server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) for file operations  
 - **Automated Test Creation**: Generates complete test suites with setup, validation, and cleanup
 - **Template-Based System**: Uses Jinja2 templates with dynamic variable substitution
+- **Comprehensive Logging**: Built-in middleware for debugging and monitoring
 
 ## Setup
 
@@ -22,7 +24,6 @@ bash setup.sh
 The setup script will:
 - Create a Python virtual environment
 - Install all required dependencies including agent-framework
-- Set up Jupyter kernel support
 
 **Note**: The MCP filesystem server is automatically managed via npx and doesn't require manual installation.
 
@@ -39,9 +40,6 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Install IPython kernel
-python -m ipykernel install --user --name=k8s-game-rule-builder
 ```
 
 ## Usage
@@ -65,17 +63,15 @@ python -m agents.k8s_task_idea_agent
 
 ### Agent Overview
 
-- **FileSystem Agent**: Reads and writes files using the MCP filesystem server
-- **Kubernetes Agent**: Interacts with Kubernetes clusters
-- **PyTest Agent**: Runs and validates test suites
-- **K8s Task Generator Agent**: Creates complete Kubernetes learning tasks
-- **K8s Task Idea Agent**: Generates unique task ideas from Kubernetes documentation
+The project includes several specialized AI agents that work together:
 
-### Agent Logic Documentation
+1. **K8s Task Idea Agent** - Generates unique Kubernetes concepts with progressive difficulty (Beginner/Intermediate/Advanced)
+2. **K8s Task Generator Agent** - Creates complete task scaffolding with templates, tests, and validation
+3. **Filesystem Agent** - Handles file operations via MCP filesystem server
+4. **Kubernetes Agent** - Executes kubectl commands against K8s clusters
+5. **PyTest Agent** - Runs and validates test suites
 
-See [docs/agent_logic.md](docs/agent_logic.md) for a detailed explanation of the Kubernetes task generator agent, its required file outputs, and how validation tests are structured.
-
-### Jupyter Support
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed technical documentation on agent logic, workflows, and system design.
 
 ## Project Structure
 
@@ -86,17 +82,56 @@ k8s-game-rule-builder/
 │   ├── __init__.py
 │   ├── filesystem_agent.py         # MCP filesystem operations
 │   ├── k8s_task_generator_agent.py # Task generation
-│   ├── k8s_task_idea_agent.py      # Idea generation
+│   ├── k8s_task_idea_agent.py      # Idea generation with memory
 │   ├── kubernetes_agent.py         # K8s cluster interaction
 │   ├── pytest_agent.py             # Test execution
 │   └── logging_middleware.py       # Agent logging
 ├── docs/                   # Documentation
-│   └── agent_logic.md     # Agent architecture and logic
+│   └── ARCHITECTURE.md    # Technical architecture & design
 ├── main.py                # Main entry point
 ├── setup.sh               # Setup script
 ├── requirements.txt       # Python dependencies
 └── README.md              # This file
 ```
+
+## Quick Start
+
+1. **Setup environment:**
+   ```bash
+   bash setup.sh
+   ```
+
+2. **Run the agent pipeline:**
+   ```bash
+   source .venv/bin/activate
+   python main.py
+   ```
+
+3. **Generate task ideas:**
+   ```bash
+   python -m agents.k8s_task_idea_agent
+   ```
+
+## Documentation
+
+- **README.md** (this file) - Quick start and overview
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Complete technical documentation including:
+  - Agent architecture and workflows
+  - Template system and validation patterns
+  - MCP integration details
+  - Memory management
+  - Logging middleware
+
+## Requirements
+
+- Python 3.x
+- Azure OpenAI API access
+- Node.js (for npx to run MCP server)
+- kubectl (for Kubernetes interaction)
+
+## License
+
+See LICENSE file for details.
 
 ## MCP Integration
 
