@@ -30,11 +30,16 @@ async def get_k8s_task_generator_agent():
         credential=AzureCliCredential(),
     )
     
-    # Connect to the MCP filesystem server
+    # Connect to the official MCP filesystem server via npx
     mcp_tool = MCPStdioTool(
         name="filesystem",
-        command="/home/developer/Documents/data-disk/k8s-game-rule-builder/.venv/bin/mcp-server-filesystem",
-        args=["/home/developer/Documents/data-disk/k8s-game-rule/tests"]
+        command="npx",
+        args=[
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "/home/developer/Documents/data-disk/k8s-game-rule/tests"
+        ],
+        load_prompts=False  # Filesystem server doesn't support prompts
     )
     
     async with mcp_tool:

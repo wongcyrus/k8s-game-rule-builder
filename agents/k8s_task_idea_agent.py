@@ -168,13 +168,18 @@ async def get_k8s_task_idea_agent():
     # Create memory provider
     memory = TaskIdeasMemory()
     
-    # Connect to the MCP filesystem server for reading K8s docs
+    # Connect to the official MCP filesystem server via npx for reading K8s docs
     # Use absolute path and ensure proper root directory
     docs_root = "/home/developer/Documents/data-disk/website/content/en/docs/concepts"
     mcp_tool = MCPStdioTool(
         name="filesystem",
-        command="/home/developer/Documents/data-disk/k8s-game-rule-builder/.venv/bin/mcp-server-filesystem",
-        args=[docs_root]
+        command="npx",
+        args=[
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            docs_root
+        ],
+        load_prompts=False  # Filesystem server doesn't support prompts
     )
     
     async with mcp_tool:

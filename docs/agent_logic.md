@@ -5,7 +5,7 @@ This document explains how the Kubernetes task generator agent works, the files 
 ## Overview
 - Agent name: K8sTaskGeneratorAgent
 - Purpose: Generate fully scaffolded Kubernetes game tasks under tests/game02/XXX_descriptive_name/ (001-999 numbering)
-- IO layer: Uses MCP filesystem tool (mcp-server-filesystem) to create directories and files directly on disk.
+- IO layer: Uses official MCP filesystem server (@modelcontextprotocol/server-filesystem) via npx to create directories and files directly on disk.
 - Invocation: async context manager get_k8s_task_generator_agent() yields the agent. The __main__ block shows an example run.
 
 ## What the agent creates
@@ -48,7 +48,7 @@ Optional generated artifacts (if the harness writes them):
 
 ## Control flow inside the agent
 1) The agent runs under an async context: async with get_k8s_task_generator_agent() as agent: ...
-2) The MCP filesystem tool is attached with root /home/developer/Documents/data-disk/k8s-game-rule/tests.
+2) The official MCP filesystem server is launched via npx with root /home/developer/Documents/data-disk/k8s-game-rule/tests.
 3) The long instruction block tells the LLM exactly which files to create and the required content patterns.
 4) On each request, the agent writes files directly via the filesystem tool; no in-memory spec is returned.
 
@@ -65,6 +65,8 @@ python agents/k8s_task_generator_agent.py
 This will generate the sample task defined in the __main__ block and write files under tests/game02/.
 
 ## Notes and troubleshooting
-- If files do not appear, confirm the MCP filesystem server path and args in get_k8s_task_generator_agent().
+- The MCP filesystem server is automatically downloaded and run via npx when the agent starts.
+- No manual installation of the MCP server is required - npx handles package management.
+- If files do not appear, confirm network access for npx to download the package on first run.
 - Ensure the venv has agent_framework and Azure identity dependencies installed.
 - For custom tasks, call agent.run(...) with your prompt specifying task name, resources, variables, and validation expectations.
