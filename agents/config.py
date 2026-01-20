@@ -1,0 +1,45 @@
+"""Centralized configuration for agent paths and validation defaults."""
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Paths:
+    tests_root: Path = Path("/home/developer/Documents/data-disk/k8s-game-rule/tests")
+    game02_root: Path = tests_root / "game02"
+    pytest_rootdir: Path = Path("/home/developer/Documents/data-disk/k8s-game-rule")
+    k8s_docs_root: Path = Path("/home/developer/Documents/data-disk/website/content/en/docs/concepts")
+
+
+@dataclass(frozen=True)
+class AzureOpenAI:
+    endpoint: str = "https://cyrus-me23xi26-eastus2.openai.azure.com/"
+    deployment_name: str = "gpt-5.2-chat"
+
+@dataclass(frozen=True)
+class ValidationConfig:
+    base_task_root: Path = Paths().game02_root
+    required_files: tuple[str, ...] = (
+        "__init__.py",
+        "instruction.md",
+        "session.json",
+        "setup.template.yaml",
+        "answer.template.yaml",
+        "test_01_setup.py",
+        "test_03_answer.py",
+        "test_05_check.py",
+        "test_06_cleanup.py",
+    )
+    yaml_files: tuple[str, ...] = ("setup.template.yaml", "answer.template.yaml")
+    py_files: tuple[str, ...] = (
+        "test_01_setup.py",
+        "test_03_answer.py",
+        "test_05_check.py",
+        "test_06_cleanup.py",
+    )
+    json_files: tuple[str, ...] = ("session.json",)
+
+
+PATHS = Paths()
+VALIDATION = ValidationConfig()
+AZURE = AzureOpenAI()

@@ -29,6 +29,7 @@ from agent_framework import (
 from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import AzureCliCredential
 from agents.logging_middleware import LoggingFunctionMiddleware
+from agents.config import PATHS, AZURE
 
 logging.basicConfig(level=logging.INFO)
 # Suppress debug messages from agent_framework and httpx
@@ -171,8 +172,8 @@ async def get_k8s_task_idea_agent():
         An agent configured to generate unique K8s task ideas from documentation.
     """
     chat_client = AzureOpenAIChatClient(
-        endpoint="https://cyrus-me23xi26-eastus2.openai.azure.com/",
-        deployment_name="gpt-5.2-chat",
+        endpoint=AZURE.endpoint,
+        deployment_name=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
 
@@ -184,7 +185,7 @@ async def get_k8s_task_idea_agent():
     
     # Connect to the official MCP filesystem server via npx for reading K8s docs
     # Use absolute path and ensure proper root directory
-    docs_root = "/home/developer/Documents/data-disk/website/content/en/docs/concepts"
+    docs_root = str(PATHS.k8s_docs_root)
     mcp_tool = MCPStdioTool(
         name="filesystem",
         command="npx",

@@ -13,6 +13,7 @@ from agent_framework import MCPStdioTool
 from agent_framework.azure import AzureOpenAIResponsesClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
+from .config import PATHS, AZURE
 
 logging.basicConfig(level=logging.INFO)
 
@@ -25,8 +26,8 @@ async def get_k8s_task_generator_agent():
         An agent configured to generate Kubernetes game task tests.
     """
     responses_client = AzureOpenAIResponsesClient(
-        endpoint="https://cyrus-me23xi26-eastus2.openai.azure.com/",
-        deployment_name="gpt-5.2-chat",
+        endpoint=AZURE.endpoint,
+        deployment_name=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
     
@@ -37,7 +38,7 @@ async def get_k8s_task_generator_agent():
         args=[
             "-y",
             "@modelcontextprotocol/server-filesystem",
-            "/home/developer/Documents/data-disk/k8s-game-rule/tests"
+            str(PATHS.tests_root)
         ],
         load_prompts=False  # Filesystem server doesn't support prompts
     )
@@ -47,7 +48,7 @@ async def get_k8s_task_generator_agent():
             name="K8sTaskGeneratorAgent",
             instructions=(
                 "You are a Kubernetes game task generator assistant following the established pattern. "
-                "You have access to filesystem tools for /home/developer/Documents/data-disk/k8s-game-rule/tests directory. "
+                f"You have access to filesystem tools for {PATHS.tests_root} directory. "
                 "\n\n=== REQUIRED COMPONENTS ===\n"
                 "For each task, create directory tests/game02/XXX_descriptive_name/ (three-digit 001-999) with these files:\n"
                 "1. __init__.py (empty file)\n"

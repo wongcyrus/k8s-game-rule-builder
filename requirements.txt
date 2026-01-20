@@ -15,5 +15,7 @@ requests-toolbelt
 # It may take a minute on first install on Windows.
 agent-framework[viz] --pre
 
+pyyaml
+
 
 # Add your project-specific dependencies below

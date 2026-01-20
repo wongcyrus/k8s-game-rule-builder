@@ -8,6 +8,7 @@ from pydantic import Field
 from agent_framework.azure import AzureOpenAIResponsesClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
+from .config import AZURE
 
 logging.basicConfig(level=logging.INFO)
 
@@ -42,8 +43,8 @@ def get_kubernetes_agent():
         An agent with kubectl tools configured.
     """
     responses_client = AzureOpenAIResponsesClient(
-        endpoint="https://cyrus-me23xi26-eastus2.openai.azure.com/",
-        deployment_name="gpt-5.2-chat",
+        endpoint=AZURE.endpoint,
+        deployment_name=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
 

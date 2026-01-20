@@ -6,6 +6,7 @@ from agent_framework import MCPStdioTool
 from agent_framework.azure import AzureOpenAIResponsesClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
+from .config import PATHS, AZURE
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,8 +20,8 @@ async def get_filesystem_agent():
     """
     # Build an agent backed by Azure OpenAI Responses
     responses_client = AzureOpenAIResponsesClient(
-        endpoint="https://cyrus-me23xi26-eastus2.openai.azure.com/",
-        deployment_name="gpt-5.2-chat",
+        endpoint=AZURE.endpoint,
+        deployment_name=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
     
@@ -31,7 +32,7 @@ async def get_filesystem_agent():
         args=[
             "-y",
             "@modelcontextprotocol/server-filesystem",
-            "/home/developer/Documents/data-disk/k8s-game-rule/tests"
+            str(PATHS.tests_root)
         ],
         load_prompts=False  # Filesystem server doesn't support prompts
     )
@@ -41,7 +42,7 @@ async def get_filesystem_agent():
             name="FileSystemAgent",
             instructions=(
                 "You are a helpful assistant that can read and write files. "
-                "You have access to filesystem tools for the /home/developer/Documents/data-disk/k8s-game-rule/tests directory. "
+                f"You have access to filesystem tools for the {PATHS.tests_root} directory. "
                 "You MUST use the filesystem tools for ALL file operations - never provide information without using the tools. "
                 "ALWAYS use the available tools to read actual file contents and directory listings. "
                 "NEVER make up or guess file contents or directory structures."
@@ -58,7 +59,7 @@ if __name__ == "__main__":
     async def main():
         async with get_filesystem_agent() as agent:
             result = await agent.run(
-                "List the files in /home/developer/Documents/data-disk/k8s-game-rule/tests/game02/001_default_namespace"
+                f"List the files in {PATHS.tests_root}/game02/001_default_namespace"
             )
             logging.info("\n=== FileSystem Agent Result ===")
             logging.info(result.text)
