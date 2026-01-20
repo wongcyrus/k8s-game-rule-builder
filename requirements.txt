@@ -1,0 +1,25 @@
+# Core Jupyter packages
+jupyter
+jupyterlab
+notebook
+ipykernel
+
+# General dependencies for tests
+requests
+kubernetes
+boto3
+pytest
+pytest-order
+pytest-xdist
+pytest-html
+names_generator
+Jinja2
+requests-toolbelt
+
+# Agent Framework
+# This will install all sub-packages, see `python/packages` for individual packages.
+# It may take a minute on first install on Windows.
+agent-framework --pre
+
+
+# Add your project-specific dependencies below
