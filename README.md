@@ -52,10 +52,14 @@ The project includes several AI agents for different purposes:
 # Activate virtual environment
 source .venv/bin/activate
 
-# Run the main agent pipeline (sequential)
+# Option 1: Launch DevUI (Interactive UI)
+devui entities
+# Open browser to http://localhost:8000
+
+# Option 2: Run the main agent pipeline (sequential)
 python main.py
 
-# Run the workflow (conditional with validation)
+# Option 3: Run the workflow (conditional with validation)
 python workflow.py
 
 # Generate workflow visualization
@@ -103,15 +107,25 @@ k8s-game-rule-builder/
 │   ├── filesystem_agent.py         # MCP filesystem operations
 │   ├── k8s_task_generator_agent.py # Task generation
 │   ├── k8s_task_idea_agent.py      # Idea generation with memory
+│   ├── k8s_task_validator_agent.py # Task validation
 │   ├── kubernetes_agent.py         # K8s cluster interaction
 │   ├── pytest_agent.py             # Test execution
 │   └── logging_middleware.py       # Agent logging
+├── entities/               # DevUI entities (agents & workflows)
+│   ├── .env               # Shared environment variables
+│   ├── k8s_task_workflow/ # Complete workflow
+│   ├── k8s_generator_agent/
+│   ├── k8s_validator_agent/
+│   └── k8s_pytest_agent/
 ├── docs/                   # Documentation
 │   └── ARCHITECTURE.md    # Technical architecture & design
-├── main.py                # Main entry point
+├── main.py                # Main entry point (sequential)
+├── workflow.py            # Workflow entry point (conditional)
+├── visualize_workflow.py  # Workflow visualization
 ├── setup.sh               # Setup script
 ├── requirements.txt       # Python dependencies
-└── README.md              # This file
+├── README.md              # This file
+└── WORKFLOW.md            # Workflow documentation
 ```
 
 ## Quick Start
@@ -133,14 +147,21 @@ k8s-game-rule-builder/
    python workflow.py
    ```
 
-4. **Generate workflow visualization:**
+4. **Launch DevUI (Interactive UI):**
+   ```bash
+   source .venv/bin/activate
+   devui entities
+   # Open browser to http://localhost:8000
+   ```
+
+5. **Generate workflow visualization:**
    ```bash
    source .venv/bin/activate
    python visualize_workflow.py
    # Creates: workflow_graph.svg, workflow_graph.png, workflow_graph.pdf
    ```
 
-5. **Generate task ideas:**
+6. **Generate task ideas:**
    ```bash
    python -m agents.k8s_task_idea_agent
    ```
@@ -148,18 +169,20 @@ k8s-game-rule-builder/
 ## Documentation
 
 - **README.md** (this file) - Quick start and overview
-- **[WORKFLOW.md](WORKFLOW.md)** - Workflow documentation including:
+- **[WORKFLOW.md](WORKFLOW.md)** - Workflow documentation:
   - Conditional workflow architecture
   - Workflow visualization (Mermaid, SVG, PNG, PDF)
   - Structured output models
   - Executor naming conventions
-  - Comparison with sequential pipeline
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Complete technical documentation including:
+- **[entities/README.md](entities/README.md)** - DevUI entities:
+  - Quick start guide
+  - Available entities
+  - Usage examples
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Technical documentation:
   - Agent architecture and workflows
   - Template system and validation patterns
   - MCP integration details
   - Memory management
-  - Logging middleware
 
 ## Requirements
 
@@ -167,6 +190,7 @@ k8s-game-rule-builder/
 - Azure OpenAI API access
 - Node.js (for npx to run MCP server)
 - kubectl (for Kubernetes interaction)
+- DevUI (optional): `pip install agent-framework[devui]`
 
 ## License
 
