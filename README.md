@@ -13,6 +13,24 @@ A Python project for building Kubernetes learning game rules using AI agents pow
 
 ## Setup
 
+### Configuration
+
+The project uses a centralized configuration in `agents/config.py`. You can customize:
+
+- **Game Name**: Change the `game_name` field in the `Paths` class to use a different game directory (default: "game02")
+- **Paths**: Adjust `tests_root`, `pytest_rootdir`, and `k8s_docs_root` as needed
+- **Azure OpenAI**: Update endpoint and deployment name in the `AzureOpenAI` class
+
+Example configuration change:
+```python
+# In agents/config.py
+@dataclass(frozen=True)
+class Paths:
+    tests_root: Path = Path("/path/to/your/tests")
+    game_name: str = "game03"  # Change to your game name
+    # ...
+```
+
 ### Quick Start
 
 Run the setup script to create a virtual environment and install dependencies:

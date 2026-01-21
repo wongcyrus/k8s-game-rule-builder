@@ -91,7 +91,7 @@ def _list_task_files(task_dir: Path) -> list[str]:
 
 
 def check_required_files(
-    task_dir: Annotated[str, Field(description="Task directory relative to tests/game02 or absolute.")]
+    task_dir: Annotated[str, Field(description=f"Task directory relative to tests/{VALIDATION.base_task_root.name} or absolute.")]
 ) -> dict[str, Any]:
     """Check that the standard task files exist."""
     resolved_dir = _resolve_path(task_dir)
@@ -102,7 +102,7 @@ def check_required_files(
 
 
 def validate_yaml_file(
-    file_path: Annotated[str, Field(description="Path to YAML file (absolute or relative to tests/game02).")]
+    file_path: Annotated[str, Field(description=f"Path to YAML file (absolute or relative to tests/{VALIDATION.base_task_root.name}).")]
 ) -> dict[str, Any]:
     """Validate YAML syntax for a single file."""
     path = _resolve_path(file_path)
@@ -116,7 +116,7 @@ def validate_yaml_file(
 
 
 def validate_python_file(
-    file_path: Annotated[str, Field(description="Path to Python file (absolute or relative to tests/game02).")]
+    file_path: Annotated[str, Field(description=f"Path to Python file (absolute or relative to tests/{VALIDATION.base_task_root.name}).")]
 ) -> dict[str, Any]:
     """Validate Python syntax using AST parsing."""
     path = _resolve_path(file_path)
@@ -130,7 +130,7 @@ def validate_python_file(
 
 
 def validate_template_file(
-    file_path: Annotated[str, Field(description="Path to Jinja template file (absolute or relative to tests/game02).")]
+    file_path: Annotated[str, Field(description=f"Path to Jinja template file (absolute or relative to tests/{VALIDATION.base_task_root.name}).")]
 ) -> dict[str, Any]:
     """Validate Jinja template syntax without rendering."""
     path = _resolve_path(file_path)
@@ -210,7 +210,7 @@ def get_k8s_task_validator_agent():
     agent = chat_client.as_agent(
         name="K8sTaskValidatorAgent",
         instructions=(
-            "You validate Kubernetes task directories under tests/game02 using the provided tools. "
+            f"You validate Kubernetes task directories under tests/{VALIDATION.base_task_root.name} using the provided tools. "
             "Follow these exact steps and name the tool you call at each step:\n"
             "1) Call check_required_files to confirm all standard files exist.\n"
             "2) For YAML files, call validate_yaml_file.\n"

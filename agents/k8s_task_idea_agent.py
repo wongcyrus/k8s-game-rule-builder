@@ -15,7 +15,7 @@ import asyncio
 import logging
 import json
 from contextlib import asynccontextmanager
-from typing import Sequence, MutableSequence, Any
+from typing import Sequence, MutableSequence, Any, Annotated
 from pydantic import BaseModel, Field
 
 from agent_framework import (
@@ -53,6 +53,69 @@ class K8sTaskConcept(BaseModel):
     tags: list[str] = Field(description="Relevant tags (e.g., scheduling, networking, storage)")
     description: str = Field(description="General description of the concept")
     variations: list[TaskVariation] = Field(description="Three variations: beginner, intermediate, advanced")
+
+
+# Global variable to store the last saved concept (for retrieval after agent run)
+_last_saved_concept: K8sTaskConcept | None = None
+
+
+def save_k8s_task_concept(
+    concept: Annotated[str, Field(description="Core Kubernetes concept name")],
+    tags: Annotated[list[str], Field(description="Relevant tags (e.g., scheduling, networking, storage)")],
+    description: Annotated[str, Field(description="General description of the concept")],
+    variations: Annotated[list[dict], Field(description="Three variations with task_id, difficulty, title, objective, key_skills, estimated_time")],
+) -> dict[str, Any]:
+    """Save a Kubernetes task concept with multiple difficulty variations.
+    
+    This tool should be called to save the generated task concept.
+    Returns a confirmation with the saved concept details.
+    """
+    global _last_saved_concept
+    
+    try:
+        # Convert variations dicts to TaskVariation objects
+        variation_objects = [TaskVariation(**v) for v in variations]
+        
+        # Create K8sTaskConcept object
+        concept_obj = K8sTaskConcept(
+            concept=concept,
+            tags=tags,
+            description=description,
+            variations=variation_objects
+        )
+        
+        # Store globally for retrieval
+        _last_saved_concept = concept_obj
+        
+        logging.info(f"✅ Saved concept via tool: {concept}")
+        logging.info(f"   Tags: {', '.join(tags)}")
+        logging.info(f"   Variations: {', '.join([v.task_id for v in variation_objects])}")
+        
+        return {
+            "success": True,
+            "message": f"Successfully saved concept: {concept}",
+            "concept": concept,
+            "variations_count": len(variation_objects),
+            "variation_ids": [v.task_id for v in variation_objects]
+        }
+    except Exception as e:
+        logging.error(f"❌ Failed to save concept: {e}")
+        return {
+            "success": False,
+            "message": f"Failed to save concept: {str(e)}",
+            "error": str(e)
+        }
+
+
+def get_last_saved_concept() -> K8sTaskConcept | None:
+    """Retrieve the last saved concept from the tool call."""
+    return _last_saved_concept
+
+
+def clear_last_saved_concept():
+    """Clear the last saved concept."""
+    global _last_saved_concept
+    _last_saved_concept = None
 
 
 class TaskIdeasMemory(ContextProvider):
@@ -185,11 +248,8 @@ async def get_k8s_task_idea_agent():
         deployment_name=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
-
-    # Persist chat history across runs using the built-in message store + thread serialization
-    message_store = ChatMessageStore()
     
-    # Create memory provider
+    # Create memory provider (replaces thread for context)
     memory = TaskIdeasMemory()
     
     # Connect to the official MCP filesystem server via npx for reading K8s docs
@@ -207,8 +267,9 @@ async def get_k8s_task_idea_agent():
     )
     
     async with mcp_tool:
-        agent = ChatAgent(
-            chat_client=chat_client,
+        # Use as_agent() with save_k8s_task_concept tool
+        agent = chat_client.as_agent(
+            name="K8sTaskIdeaAgent",
             instructions=(
                 "You are a Kubernetes task idea generator that creates detailed task concepts with three difficulty variations. "
                 "Read official K8s documentation and propose comprehensive learning concepts for a Kubernetes game. "
@@ -218,27 +279,27 @@ async def get_k8s_task_idea_agent():
                 "3. Use 3-digit task IDs (001-999) in format: XXX_concept_name_level (e.g., 041_secrets_basic)\n"
                 "4. Each variation should build on the previous one with increasing complexity\n"
                 "5. Include practical, hands-on scenarios covering: Workloads, Services, Storage, Configuration, Security, Scheduling, Policies\n"
-                "\nThe response will be automatically structured - just provide the data."
+                "\n**CRITICAL**: You MUST call the save_k8s_task_concept tool to save your generated concept.\n"
+                "The tool requires:\n"
+                "- concept: string (core concept name)\n"
+                "- tags: list of strings (e.g., ['scheduling', 'networking'])\n"
+                "- description: string (general description)\n"
+                "- variations: list of 3 dicts, each with:\n"
+                "  - task_id: string (XXX_concept_level)\n"
+                "  - difficulty: string (BEGINNER/INTERMEDIATE/ADVANCED)\n"
+                "  - title: string\n"
+                "  - objective: string\n"
+                "  - key_skills: list of strings\n"
+                "  - estimated_time: integer (minutes)\n"
+                "\nAlways call save_k8s_task_concept with your generated concept."
             ),
-            tools=[mcp_tool],
+            tools=[mcp_tool, save_k8s_task_concept],
+            tool_choice="auto",
             context_providers=[memory],
             middleware=[LoggingFunctionMiddleware()],
-            chat_message_store_factory=lambda: message_store,
         )
 
-        # Restore thread if saved
-        thread_state_path = Path(__file__).parent.parent / "task_ideas_thread.json"
-        if thread_state_path.exists():
-            try:
-                with open(thread_state_path, "r") as f:
-                    thread_data = json.load(f)
-                thread = await agent.deserialize_thread(thread_data)
-            except Exception:
-                thread = agent.get_new_thread()
-        else:
-            thread = agent.get_new_thread()
-
-        yield agent, memory, thread, thread_state_path
+        yield agent, memory
 
 
 async def create_idea_agent_with_mcp(mcp_tool):
@@ -248,7 +309,7 @@ async def create_idea_agent_with_mcp(mcp_tool):
         mcp_tool: An already initialized MCPStdioTool instance for K8s docs
         
     Returns:
-        Tuple of (agent, memory, thread, thread_state_path)
+        Tuple of (agent, memory)
     """
     chat_client = AzureOpenAIChatClient(
         endpoint=AZURE.endpoint,
@@ -256,11 +317,11 @@ async def create_idea_agent_with_mcp(mcp_tool):
         credential=AzureCliCredential(),
     )
 
-    message_store = ChatMessageStore()
     memory = TaskIdeasMemory()
     
-    agent = ChatAgent(
-        chat_client=chat_client,
+    # Use as_agent() with save_k8s_task_concept tool
+    agent = chat_client.as_agent(
+        name="K8sTaskIdeaAgent",
         instructions=(
             "You are a Kubernetes task idea generator that creates detailed task concepts with three difficulty variations. "
             "Read official K8s documentation and propose comprehensive learning concepts for a Kubernetes game. "
@@ -270,32 +331,32 @@ async def create_idea_agent_with_mcp(mcp_tool):
             "3. Use 3-digit task IDs (001-999) in format: XXX_concept_name_level (e.g., 041_secrets_basic)\n"
             "4. Each variation should build on the previous one with increasing complexity\n"
             "5. Include practical, hands-on scenarios covering: Workloads, Services, Storage, Configuration, Security, Scheduling, Policies\n"
-            "\nThe response will be automatically structured - just provide the data."
+            "\n**CRITICAL**: You MUST call the save_k8s_task_concept tool to save your generated concept.\n"
+            "The tool requires:\n"
+            "- concept: string (core concept name)\n"
+            "- tags: list of strings (e.g., ['scheduling', 'networking'])\n"
+            "- description: string (general description)\n"
+            "- variations: list of 3 dicts, each with:\n"
+            "  - task_id: string (XXX_concept_level)\n"
+            "  - difficulty: string (BEGINNER/INTERMEDIATE/ADVANCED)\n"
+            "  - title: string\n"
+            "  - objective: string\n"
+            "  - key_skills: list of strings\n"
+            "  - estimated_time: integer (minutes)\n"
+            "\nAlways call save_k8s_task_concept with your generated concept."
         ),
-        tools=[mcp_tool],
+        tools=[mcp_tool, save_k8s_task_concept],
+        tool_choice="auto",
         context_providers=[memory],
         middleware=[LoggingFunctionMiddleware()],
-        chat_message_store_factory=lambda: message_store,
     )
 
-    # Restore thread if saved
-    thread_state_path = Path(__file__).parent.parent / "task_ideas_thread.json"
-    if thread_state_path.exists():
-        try:
-            with open(thread_state_path, "r") as f:
-                thread_data = json.load(f)
-            thread = await agent.deserialize_thread(thread_data)
-        except Exception:
-            thread = agent.get_new_thread()
-    else:
-        thread = agent.get_new_thread()
-
-    return agent, memory, thread, thread_state_path
+    return agent, memory
 
 
 if __name__ == "__main__":
     async def main():
-        async with get_k8s_task_idea_agent() as (agent, memory, thread, thread_state_path):
+        async with get_k8s_task_idea_agent() as (agent, memory):
             logging.info(f"\nStarting with {len(memory.generated_ideas)} existing concepts in memory\n")
 
             for round_num in range(3):
@@ -303,16 +364,19 @@ if __name__ == "__main__":
                 logging.info(f"Round {round_num + 1}: Generating New Kubernetes Concept")
                 logging.info(f"{'='*70}")
 
+                # Clear previous concept
+                clear_last_saved_concept()
+                
                 result = await agent.run(
                     "Based on Kubernetes documentation, suggest a NEW concept not yet covered. "
-                    "Generate 3 task variations (Beginner, Intermediate, Advanced) with full details.",
-                    thread=thread,
-                    response_format=K8sTaskConcept,
+                    "Generate 3 task variations (Beginner, Intermediate, Advanced) with full details. "
+                    "Call save_k8s_task_concept to save your concept."
                 )
                 
-                # Access structured output directly
-                if result.value:
-                    concept = result.value
+                # Get concept from tool call
+                concept = get_last_saved_concept()
+                
+                if concept:
                     logging.info(f"\n✅ Generated Concept: {concept.concept}")
                     logging.info(f"   Tags: {', '.join(concept.tags)}")
                     logging.info(f"   Variations: {', '.join([v.task_id for v in concept.variations])}")
@@ -320,12 +384,8 @@ if __name__ == "__main__":
                     # Save to memory
                     memory.add_structured_concept(concept)
                 else:
-                    logging.warning("No structured data received")
-
-                # Save thread state after each call
-                serialized_thread = await thread.serialize()
-                with open(thread_state_path, "w") as f:
-                    json.dump(serialized_thread, f)
+                    logging.warning("⚠️  No concept saved via tool call")
+                    logging.warning(f"   Agent response: {result.text[:200]}")
 
             logging.info(f"\n\n{'='*70}")
             logging.info("All Saved Concepts:")

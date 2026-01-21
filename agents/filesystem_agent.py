@@ -59,7 +59,7 @@ if __name__ == "__main__":
     async def main():
         async with get_filesystem_agent() as agent:
             result = await agent.run(
-                f"List the files in {PATHS.tests_root}/game02/001_default_namespace"
+                f"List the files in {PATHS.game_root}/001_default_namespace"
             )
             logging.info("\n=== FileSystem Agent Result ===")
             logging.info(result.text)

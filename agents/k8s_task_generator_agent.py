@@ -1,7 +1,7 @@
 """Kubernetes Game Task Generator Agent for creating test tasks.
 
 This agent uses the MCP filesystem tool to generate complete Kubernetes learning tasks
-under tests/game02/XXX_descriptive_name/ with all required files (001-999 numbering).
+under tests/{game_name}/XXX_descriptive_name/ with all required files (001-999 numbering).
 
 The agent does NOT use Python functions to generate files - it uses the MCP filesystem
 tool's create_directory and write_file capabilities based on the instructions provided.
@@ -27,7 +27,7 @@ def _get_generator_instructions():
         "You are a Kubernetes game task generator assistant following the established pattern. "
         f"You have access to filesystem tools for {PATHS.tests_root} directory. "
         "\n\n=== REQUIRED COMPONENTS ===\n"
-        "For each task, create directory tests/game02/XXX_descriptive_name/ (three-digit 001-999) with these files:\n"
+        f"For each task, create directory tests/{PATHS.game_name}/XXX_descriptive_name/ (three-digit 001-999) with these files:\n"
         "1. __init__.py (empty file)\n"
         "2. instruction.md - User-facing challenge with template variables\n"
         "3. session.json - REQUIRED: Simple JSON object with variables\n"

@@ -6,9 +6,14 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Paths:
     tests_root: Path = Path("/home/developer/Documents/data-disk/k8s-game-rule/tests")
-    game02_root: Path = tests_root / "game02"
+    game_name: str = "game02"  # Configurable game name
     pytest_rootdir: Path = Path("/home/developer/Documents/data-disk/k8s-game-rule")
     k8s_docs_root: Path = Path("/home/developer/Documents/data-disk/website/content/en/docs/concepts")
+    
+    @property
+    def game_root(self) -> Path:
+        """Dynamic game root based on game_name."""
+        return self.tests_root / self.game_name
 
 
 @dataclass(frozen=True)
@@ -18,7 +23,7 @@ class AzureOpenAI:
 
 @dataclass(frozen=True)
 class ValidationConfig:
-    base_task_root: Path = Paths().game02_root
+    base_task_root: Path = Paths().game_root
     required_files: tuple[str, ...] = (
         "__init__.py",
         "instruction.md",

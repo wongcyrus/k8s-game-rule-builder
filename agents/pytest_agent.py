@@ -21,7 +21,7 @@ def _result(is_valid: bool, reason: str, details: list[Any] | None = None) -> di
 
 
 def run_pytest_command(
-    command: Annotated[str, Field(description="The exact pytest command to run, e.g. 'pytest --import-mode=importlib --rootdir=. tests/game02/002_create_namespace/'")]
+    command: Annotated[str, Field(description=f"The exact pytest command to run, e.g. 'pytest --import-mode=importlib --rootdir=. tests/{PATHS.game_name}/002_create_namespace/'")]
 ) -> dict[str, Any]:
     """Run the provided pytest command and return structured result."""
     test_project_path = str(PATHS.pytest_rootdir)
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     async def main():
         agent = get_pytest_agent()
         result = await agent.run(
-            "pytest --import-mode=importlib --rootdir=. tests/game02/002_create_namespace/"
+            f"pytest --import-mode=importlib --rootdir=. tests/{PATHS.game_name}/002_create_namespace/"
         )
         logging.info("\n=== PyTest Agent Result ===")
         logging.info(result.text)

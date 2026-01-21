@@ -120,31 +120,36 @@ async def parse_generated_task(response: AgentExecutorResponse, ctx: WorkflowCon
     text = response.agent_response.text
     logging.info(f"Generator response (first 500 chars): {text[:500]}")
     
-    # Extract task ID from response
-    task_id_match = re.search(r'tests/game02/(\d{3}_[a-z0-9_]+)', text)
-    if not task_id_match:
-        task_id_match = re.search(r'(\d{3}_[a-z0-9_]+)', text)
+    # Try to get task_id from shared state first (set by main())
+    try:
+        task_id = await ctx.get_shared_state("task_id")
+        logging.info(f"✅ Using task ID from shared state: {task_id}")
+    except KeyError:
+        # Fallback: Extract task ID from response text
+        task_id_match = re.search(rf'tests/{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
+        if not task_id_match:
+            task_id_match = re.search(r'(\d{3}_[a-z0-9_]+)', text)
+        
+        if task_id_match:
+            task_id = task_id_match.group(1)
+            logging.info(f"✅ Extracted task ID from response: {task_id}")
+        else:
+            logging.error("❌ Could not extract task ID from generation response")
+            # Increment retry count
+            try:
+                retry_count = await ctx.get_shared_state("retry_count")
+                retry_count += 1
+            except KeyError:
+                retry_count = 1
+            await ctx.set_shared_state("retry_count", retry_count)
+            raise ValueError("Failed to parse task ID from generation")
     
-    if task_id_match:
-        task_id = task_id_match.group(1)
-        logging.info(f"✅ Extracted task ID: {task_id}")
-        
-        task_info = TaskInfo(
-            task_id=task_id,
-            task_directory=f"tests/game02/{task_id}"
-        )
-        
-        await ctx.send_message(task_info)
-    else:
-        logging.error("❌ Could not extract task ID from generation response")
-        # Increment retry count
-        try:
-            retry_count = await ctx.get_shared_state("retry_count")
-            retry_count += 1
-        except KeyError:
-            retry_count = 1
-        await ctx.set_shared_state("retry_count", retry_count)
-        raise ValueError("Failed to parse task ID from generation")
+    task_info = TaskInfo(
+        task_id=task_id,
+        task_directory=f"tests/{PATHS.game_name}/{task_id}"
+    )
+    
+    await ctx.send_message(task_info)
 
 
 # Executor: Create validation request
@@ -192,7 +197,7 @@ async def parse_validation_result(response: AgentExecutorResponse, ctx: Workflow
                 is_valid=is_valid,
                 reason=text[:200],
                 task_id=task_id,
-                task_directory=f"tests/game02/{task_id}"
+                task_directory=f"tests/{PATHS.game_name}/{task_id}"
             )
         
         status = "✅ PASSED" if validation.is_valid else "❌ FAILED"
@@ -246,9 +251,9 @@ async def parse_tests_and_decide(response: AgentExecutorResponse, ctx: WorkflowC
     # Extract task ID from response
     task_id_match = re.search(r'Task ID: (\d{3}_[a-z0-9_]+)', text)
     if not task_id_match:
-        task_id_match = re.search(r'tests/game02/(\d{3}_[a-z0-9_]+)', text)
+        task_id_match = re.search(rf'tests/{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
     task_id = task_id_match.group(1) if task_id_match else "unknown"
-    task_directory = f"tests/game02/{task_id}"
+    task_directory = f"tests/{PATHS.game_name}/{task_id}"
     
     # Parse test result - look for pytest success indicators
     # Check for explicit success messages or passed count
@@ -304,7 +309,7 @@ async def parse_tests_and_decide(response: AgentExecutorResponse, ctx: WorkflowC
             is_valid=True,
             reason="Validation passed (assumed)",
             task_id=task_id,
-            task_directory=task_directory
+            task_directory=f"tests/{PATHS.game_name}/{task_id}"
         )
     
     # Get retry count
@@ -412,7 +417,7 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[C
     logging.info(f"   Retry attempts: {combined.retry_count}/{combined.max_retries}")
     
     # Actually remove the directory - use absolute path
-    task_path = PATHS.tests_root / "game02" / combined.test.task_id
+    task_path = PATHS.game_root / combined.test.task_id
     if task_path.exists():
         shutil.rmtree(task_path)
         logging.info(f"   🗑️  Deleted directory: {task_path}")
@@ -473,10 +478,10 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
         target_topic = "a Kubernetes concept"
     
     # Get list of existing task IDs to avoid duplication
-    game02_dir = PATHS.tests_root / "game02"
+    game_dir = PATHS.game_root
     existing_tasks = []
-    if game02_dir.exists():
-        existing_tasks = [d.name for d in game02_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
+    if game_dir.exists():
+        existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
     
     generation_prompt = (
         f"Generate a complete Kubernetes learning task about '{target_topic}' with a unique ID in format '###_concept_name'. "
@@ -540,7 +545,7 @@ async def main():
     # Initialize all MCP tools in a single context
     async with docs_mcp_tool, tests_mcp_tool:
         # Create agents with MCP tools
-        idea_agent, idea_memory, idea_thread, thread_state_path = await create_idea_agent_with_mcp(docs_mcp_tool)
+        idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
         generator_agent = await create_generator_agent_with_mcp(tests_mcp_tool)
         
         logging.info(f"✅ Idea agent initialized with {len(idea_memory.generated_ideas)} existing concepts")
@@ -637,28 +642,25 @@ async def main():
         logging.info("\n[STEP 1] Generating unique task idea from K8s documentation...")
         logging.info("-"*80)
         
-        from agents.k8s_task_idea_agent import K8sTaskConcept
+        from agents.k8s_task_idea_agent import K8sTaskConcept, get_last_saved_concept, clear_last_saved_concept
+        
+        # Clear any previous concept
+        clear_last_saved_concept()
         
         idea_result = await idea_agent.run(
             "Based on the Kubernetes documentation, suggest ONE new and unique task idea "
             "for teaching Kubernetes concepts. Choose a concept that hasn't been covered yet. "
             "Provide a clear task ID in format '###_concept_name' (e.g., '050_secrets_management'). "
-            "Include the objective and what students will learn.",
-            thread=idea_thread,
-            response_format=K8sTaskConcept,
+            "Include the concept name, description, and objective for what students will learn. "
+            "Call save_k8s_task_concept to save your concept."
         )
         
-        # Extract concept
-        concept = None
-        if idea_result.value and isinstance(idea_result.value, K8sTaskConcept):
-            concept = idea_result.value
-            logging.info("✅ Got structured output from idea agent")
-        else:
-            logging.error("❌ Failed to get structured output from idea agent")
-            logging.error(f"   idea_result.value type: {type(idea_result.value)}")
-            logging.error(f"   idea_result.value: {idea_result.value}")
-            if hasattr(idea_result, 'text'):
-                logging.error(f"   Response text (first 500 chars): {idea_result.text[:500]}")
+        # Get concept from tool call
+        concept = get_last_saved_concept()
+        
+        if not concept:
+            logging.error("❌ No concept saved via tool call")
+            logging.error(f"   Agent response (first 500 chars): {idea_result.text[:500]}")
             return
         
         # Save to memory
@@ -674,20 +676,14 @@ async def main():
         target_topic = concept.concept
         task_id = beginner_task.task_id
         
-        # Persist thread state
-        import json
-        serialized_thread = await idea_thread.serialize()
-        with open(thread_state_path, "w") as f:
-            json.dump(serialized_thread, f)
-        
         logging.info(f"\n[STEP 2] Running workflow to generate task files...")
         logging.info("-"*80)
         
         # Get list of existing task IDs to avoid duplication
-        game02_dir = PATHS.tests_root / "game02"
+        game_dir = PATHS.game_root
         existing_tasks = []
-        if game02_dir.exists():
-            existing_tasks = [d.name for d in game02_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
+        if game_dir.exists():
+            existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
         
         task_prompt = (
             f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "

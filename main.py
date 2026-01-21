@@ -188,7 +188,7 @@ async def main():
                 f"at {task_info.get('difficulty', 'beginner')} difficulty level.\n\n"
                 f"Task: {task_info.get('title', 'Kubernetes Learning Task')}\n"
                 f"Objective: {task_info.get('description', 'Learn Kubernetes concepts')}\n\n"
-                f"Create ALL required files in tests/game02/{task_info['task_id']}/:\n"
+                f"Create ALL required files in tests/{PATHS.game_name}/{task_info['task_id']}/:\n"
                 f"- __init__.py (empty)\n"
                 f"- instruction.md (user-facing challenge with Jinja variables)\n"
                 f"- session.json (JSON with template variables)\n"
@@ -207,7 +207,7 @@ async def main():
             logging.info(task_result.text[:500] + "..." if len(task_result.text) > 500 else task_result.text)
             
             # Extract directory path if mentioned
-            task_directory = f"tests/game02/{task_info['task_id']}"
+            task_directory = f"tests/{PATHS.game_name}/{task_info['task_id']}"
         
         logging.info(f"\n→ Task created at: {task_directory}")
         
