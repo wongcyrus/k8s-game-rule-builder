@@ -16,7 +16,7 @@ python workflow.py
 # Generate workflow visualization
 python visualize_workflow.py
 
-# Launch DevUI
+# Launch DevUI with full workflow
 ./launch_devui.sh
 ```
 
@@ -91,11 +91,27 @@ complete_workflow → END
 - **2 Decision Points**: Keep/remove tasks, continue/complete workflow
 - **Max Tasks**: 3 (configurable in `workflow.py`)
 
-## DevUI Entities
+## DevUI
 
-- ✅ **k8s_validator_agent** - Validate tasks
-- ✅ **k8s_pytest_agent** - Run tests
-- ✅ **k8s_task_workflow** - Simplified workflow (validation + testing)
+Launch DevUI with the full workflow and all agents:
+
+```bash
+./launch_devui.sh
+# or
+python launch_devui_full.py
+```
+
+**Registered Entities (4):**
+- ✅ **K8s Task Workflow** - Full workflow with loop
+- ✅ **Generator Agent** - Creates K8s tasks with MCP filesystem
+- ✅ **Validator Agent** - Validates task structure and syntax
+- ✅ **Pytest Agent** - Runs tests on tasks
+
+**Features:**
+- Same as workflow.py
+- Loop functionality (generates 3 tasks)
+- Two decision points
+- Shared state management
 - ⚠️ **k8s_generator_agent** - Placeholder (requires async context)
 
 ## Configuration
@@ -141,3 +157,48 @@ PATHS = PathConfig(
 - DevUI entities loading correctly
 - Documentation updated
 - Visualization generating properly
+- **Thread management fix applied** - All agents use in-memory conversation management
+
+## Troubleshooting
+
+### Workflow Loop Issue (Fixed 2026-01-21)
+
+**Problem**: Azure OpenAI error on second loop iteration:
+```
+Error code: 400 - {'error': {'message': 'No tool call found for function call output with call_id...'}}
+```
+
+**Root Cause**: 
+- All three agents (generator, validator, pytest) were using `AzureOpenAIResponsesClient`
+- This client stores conversation threads on Azure service (server-side persistence)
+- When workflow looped, agents reused Azure threads from previous iterations
+- Tool call IDs from iteration 1 conflicted with iteration 2
+
+**Solution**: Switched all agents to `AzureOpenAIChatClient`
+- Chat client manages conversations **in-memory** (no server-side persistence)
+- Each workflow iteration gets clean conversation context
+- No tool call ID conflicts between iterations
+
+**Files Modified**:
+```python
+# agents/k8s_task_generator_agent.py
+from agent_framework.azure import AzureOpenAIChatClient  # was: AzureOpenAIResponsesClient
+chat_client = AzureOpenAIChatClient(...)
+agent = chat_client.as_agent(...)
+
+# agents/k8s_task_validator_agent.py  
+from agent_framework.azure import AzureOpenAIChatClient  # was: AzureOpenAIResponsesClient
+chat_client = AzureOpenAIChatClient(...)
+agent = chat_client.as_agent(...)
+
+# agents/pytest_agent.py
+from agent_framework.azure import AzureOpenAIChatClient  # was: AzureOpenAIResponsesClient
+chat_client = AzureOpenAIChatClient(...)
+agent = chat_client.as_agent(...)
+```
+
+**Key Difference**:
+- **AzureOpenAIResponsesClient**: Server-side thread persistence (causes loop issues)
+- **AzureOpenAIChatClient**: In-memory conversation management (works with loops)
+
+**Result**: ✅ Workflow successfully completes all 3 task generations without errors

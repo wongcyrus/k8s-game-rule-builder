@@ -13,7 +13,32 @@ python workflow.py
 
 # Generate visualization only
 python visualize_workflow.py
+
+# Launch DevUI with full workflow
+./launch_devui.sh
 ```
+
+## DevUI
+
+Launch DevUI with the full workflow and all agents:
+
+```bash
+./launch_devui.sh
+# or
+python launch_devui_full.py
+```
+
+**Registered Entities:**
+- ✅ K8s Task Workflow (with loop)
+- ✅ Generator Agent (with MCP filesystem)
+- ✅ Validator Agent
+- ✅ Pytest Agent
+
+**Features:**
+- Loop functionality (generates 3 tasks)
+- Two decision points (keep/remove, continue/complete)
+- Shared state management
+- Same as workflow.py
 
 ## Workflow Architecture
 

@@ -1,11 +1,15 @@
-"""PyTest agent for running test commands via tool calls."""
+"""PyTest agent for running test commands via tool calls.
+
+NOTE: Uses AzureOpenAIChatClient instead of AzureOpenAIResponsesClient to avoid
+server-side thread persistence issues in workflow loops.
+"""
 import asyncio
 import logging
 import subprocess
 from typing import Annotated, Any
 from .config import PATHS, AZURE
 from pydantic import Field
-from agent_framework.azure import AzureOpenAIResponsesClient
+from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
 
@@ -43,14 +47,18 @@ def run_pytest_command(
 
 
 def get_pytest_agent():
-    """Create and return a PyTest agent with the run_pytest_command tool configured."""
-    responses_client = AzureOpenAIResponsesClient(
+    """Create and return a PyTest agent with the run_pytest_command tool configured.
+    
+    Uses AzureOpenAIChatClient for in-memory conversation management,
+    avoiding Azure service-side thread persistence issues in workflow loops.
+    """
+    chat_client = AzureOpenAIChatClient(
         endpoint=AZURE.endpoint,
         deployment_name=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
 
-    agent = responses_client.as_agent(
+    agent = chat_client.as_agent(
         name="PyTestAgent",
         instructions=(
             "You are a test runner assistant. "

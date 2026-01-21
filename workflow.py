@@ -390,7 +390,11 @@ async def check_loop(combined: CombinedValidationResult, ctx: WorkflowContext[Co
 # Executor: Generate next task (loop back)
 @executor(id="generate_next")
 async def generate_next(combined: CombinedValidationResult, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
-    """Generate the next task in the loop."""
+    """Generate the next task in the loop.
+    
+    Note: The generator AgentExecutor's conversation history is managed by the workflow.
+    Each loop iteration sends a fresh request, and the executor handles thread management.
+    """
     logging.info(f"\n🔄 LOOP: Generating task {combined.task_count + 1}/{combined.max_tasks}")
     
     generation_prompt = (

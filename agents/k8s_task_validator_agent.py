@@ -2,6 +2,9 @@
 
 Provides tools to validate generated game tasks by checking required files,
 YAML syntax, Python code parsing, and Jinja template syntax.
+
+NOTE: Uses AzureOpenAIChatClient instead of AzureOpenAIResponsesClient to avoid
+server-side thread persistence issues in workflow loops.
 """
 import asyncio
 import ast
@@ -15,7 +18,7 @@ from typing import Annotated, Any
 import yaml
 from jinja2 import Environment, TemplateSyntaxError
 from pydantic import Field
-from agent_framework.azure import AzureOpenAIResponsesClient
+from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import AzureCliCredential
 from agents.config import VALIDATION, AZURE
 
@@ -192,15 +195,19 @@ def validate_task_directory(
 
 
 def get_k8s_task_validator_agent():
-    """Create and return the Kubernetes task validator agent."""
-    responses_client = AzureOpenAIResponsesClient(
+    """Create and return the Kubernetes task validator agent.
+    
+    Uses AzureOpenAIChatClient for in-memory conversation management,
+    avoiding Azure service-side thread persistence issues in workflow loops.
+    """
+    chat_client = AzureOpenAIChatClient(
         endpoint=AZURE.endpoint,
         deployment_name=AZURE.deployment_name,
         temperature=0.0,
         credential=AzureCliCredential(),
     )
 
-    agent = responses_client.as_agent(
+    agent = chat_client.as_agent(
         name="K8sTaskValidatorAgent",
         instructions=(
             "You validate Kubernetes task directories under tests/game02 using the provided tools. "

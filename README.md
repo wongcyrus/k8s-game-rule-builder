@@ -52,23 +52,17 @@ The project includes several AI agents for different purposes:
 # Activate virtual environment
 source .venv/bin/activate
 
-# Option 1: Launch DevUI (Interactive UI)
-devui entities
-# Open browser to http://localhost:8000
+# Option 1: Launch DevUI (Interactive UI with full workflow)
+./launch_devui.sh
+# Opens browser to http://localhost:8081
+# Includes: Workflow + Generator + Validator + Pytest agents
 
-# Option 2: Run the main agent pipeline (sequential)
-python main.py
-
-# Option 3: Run the workflow (conditional with validation, single task)
+# Option 2: Run the workflow directly (generates 3 tasks with loop)
 python workflow.py
-
-# Option 4: Run the workflow loop (multiple tasks with statistics)
-python workflow_loop.py
 
 # Generate workflow visualization
 python visualize_workflow.py
-
-# Run individual agents
+```# Run individual agents
 python -m agents.filesystem_agent
 python -m agents.k8s_task_generator_agent
 python -m agents.k8s_task_idea_agent
