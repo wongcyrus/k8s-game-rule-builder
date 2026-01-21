@@ -28,15 +28,17 @@ from agent_framework import (
     WorkflowEvent,
     WorkflowViz,
     executor,
+    MCPStdioTool,
 )
 from agent_framework.azure import AzureOpenAIResponsesClient
 from azure.identity import AzureCliCredential
 
 from agents import (
     get_pytest_agent,
-    get_k8s_task_generator_agent,
     get_k8s_task_validator_agent,
 )
+from agents.k8s_task_generator_agent import create_generator_agent_with_mcp
+from agents.k8s_task_idea_agent import create_idea_agent_with_mcp
 from agents.config import PATHS, AZURE
 
 logging.basicConfig(
@@ -101,6 +103,19 @@ class TaskWithValidation:
 async def parse_generated_task(response: AgentExecutorResponse, ctx: WorkflowContext[TaskInfo]) -> None:
     """Parse task generation response and extract task info."""
     logging.info("\n[EXECUTOR] parse_generated_task: Extracting task ID from generator response...")
+    
+    # Initialize shared state if not already set (for DevUI and other entry points)
+    try:
+        await ctx.get_shared_state("retry_count")
+    except KeyError:
+        await ctx.set_shared_state("retry_count", 0)
+        logging.info("Initialized retry_count to 0")
+    
+    try:
+        await ctx.get_shared_state("max_retries")
+    except KeyError:
+        await ctx.set_shared_state("max_retries", 3)
+        logging.info("Initialized max_retries to 3")
     
     text = response.agent_response.text
     logging.info(f"Generator response (first 500 chars): {text[:500]}")
@@ -412,8 +427,16 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[C
         f"❌ Task {combined.test.task_id} failed checks and has been removed. Reasons: {'; '.join(reasons)}"
     )
     
-    # Send message to check_loop
-    await ctx.send_message(combined)
+    # Create updated combined result with new retry count
+    updated_combined = CombinedValidationResult(
+        validation=combined.validation,
+        test=combined.test,
+        retry_count=retry_count,
+        max_retries=combined.max_retries
+    )
+    
+    # Send updated message to check_loop
+    await ctx.send_message(updated_combined)
 
 
 # Executor: Check if should loop back
@@ -499,8 +522,30 @@ async def main():
         credential=credential,
     )
     
-    # Create agent executors
-    async with get_k8s_task_generator_agent() as generator_agent:
+    # Create all MCP tools at workflow level to avoid nested context issues
+    docs_mcp_tool = MCPStdioTool(
+        name="filesystem_docs",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", str(PATHS.k8s_docs_root)],
+        load_prompts=False
+    )
+    
+    tests_mcp_tool = MCPStdioTool(
+        name="filesystem_tests",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", str(PATHS.tests_root)],
+        load_prompts=False
+    )
+    
+    # Initialize all MCP tools in a single context
+    async with docs_mcp_tool, tests_mcp_tool:
+        # Create agents with MCP tools
+        idea_agent, idea_memory, idea_thread, thread_state_path = await create_idea_agent_with_mcp(docs_mcp_tool)
+        generator_agent = await create_generator_agent_with_mcp(tests_mcp_tool)
+        
+        logging.info(f"✅ Idea agent initialized with {len(idea_memory.generated_ideas)} existing concepts")
+        
+        # Create agent executors
         generator_executor = AgentExecutor(generator_agent, id="generator_agent")
         
         validator_agent = get_k8s_task_validator_agent()
@@ -588,8 +633,55 @@ async def main():
         
         logging.info("\n" + "="*80)
         
-        # Run workflow with topic parameter
-        target_topic = "ConfigMaps and environment variables"  # Can be parameterized
+        # Step 1: Generate unique task idea using idea agent
+        logging.info("\n[STEP 1] Generating unique task idea from K8s documentation...")
+        logging.info("-"*80)
+        
+        from agents.k8s_task_idea_agent import K8sTaskConcept
+        
+        idea_result = await idea_agent.run(
+            "Based on the Kubernetes documentation, suggest ONE new and unique task idea "
+            "for teaching Kubernetes concepts. Choose a concept that hasn't been covered yet. "
+            "Provide a clear task ID in format '###_concept_name' (e.g., '050_secrets_management'). "
+            "Include the objective and what students will learn.",
+            thread=idea_thread,
+            response_format=K8sTaskConcept,
+        )
+        
+        # Extract concept
+        concept = None
+        if idea_result.value and isinstance(idea_result.value, K8sTaskConcept):
+            concept = idea_result.value
+            logging.info("✅ Got structured output from idea agent")
+        else:
+            logging.error("❌ Failed to get structured output from idea agent")
+            logging.error(f"   idea_result.value type: {type(idea_result.value)}")
+            logging.error(f"   idea_result.value: {idea_result.value}")
+            if hasattr(idea_result, 'text'):
+                logging.error(f"   Response text (first 500 chars): {idea_result.text[:500]}")
+            return
+        
+        # Save to memory
+        idea_memory.add_structured_concept(concept)
+        logging.info(f"✅ Saved concept to memory: {concept.concept}")
+        
+        # Use beginner variation
+        beginner_task = concept.variations[0] if concept.variations else None
+        if not beginner_task:
+            logging.error("❌ No task variations found")
+            return
+        
+        target_topic = concept.concept
+        task_id = beginner_task.task_id
+        
+        # Persist thread state
+        import json
+        serialized_thread = await idea_thread.serialize()
+        with open(thread_state_path, "w") as f:
+            json.dump(serialized_thread, f)
+        
+        logging.info(f"\n[STEP 2] Running workflow to generate task files...")
+        logging.info("-"*80)
         
         # Get list of existing task IDs to avoid duplication
         game02_dir = PATHS.tests_root / "game02"
@@ -598,7 +690,12 @@ async def main():
             existing_tasks = [d.name for d in game02_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
         
         task_prompt = (
-            f"Generate a complete Kubernetes learning task about '{target_topic}' with a unique ID in format '###_concept_name'. "
+            f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
+            f"\n\nTask Details:"
+            f"\n- Concept: {concept.concept}"
+            f"\n- Description: {concept.description}"
+            f"\n- Difficulty: {beginner_task.difficulty}"
+            f"\n- Objective: {beginner_task.objective}"
             f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
             f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
             f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
@@ -607,13 +704,14 @@ async def main():
             f"Make sure all files are syntactically correct and tests will pass."
         )
         
-        logging.info(f"\n🚀 Starting workflow for topic: {target_topic}")
+        logging.info(f"\n🚀 Starting workflow for: {target_topic}")
+        logging.info(f"   Task ID: {task_id}")
         logging.info(f"   Existing tasks: {len(existing_tasks)}")
         
         # Store target topic in workflow context for retry attempts
-        async for event in workflow.run_stream(task_prompt, initial_state={"target_topic": target_topic, "retry_count": 0, "max_retries": 3}):
+        async for event in workflow.run_stream(task_prompt, initial_state={"target_topic": target_topic, "task_id": task_id, "retry_count": 0, "max_retries": 3}):
             if isinstance(event, WorkflowEvent):
-                if event.data:  # Only log non-empty events
+                if event.data and isinstance(event.data, str) and event.data.strip():  # Only log non-empty string events
                     logging.info(f"\n📤 Workflow output: {event.data}")
         
         logging.info("\n" + "="*80)

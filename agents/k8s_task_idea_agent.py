@@ -64,9 +64,11 @@ class TaskIdeasMemory(ContextProvider):
         Args:
             memory_file: Path to JSON file storing generated task ideas.
         """
+        logging.info(f"Initializing TaskIdeasMemory with memory_file={memory_file}")
         # Store memory file in the project root directory
         project_root = Path(__file__).parent.parent
         self.memory_file = project_root / memory_file
+        logging.info(f"Memory file path resolved to: {self.memory_file}")
         self.generated_ideas: dict[str, dict] = {}  # Format: {task_id: {concept, description, variations, difficulty, tags}}
         self._ensure_memory_file()
         self._load_ideas()
@@ -93,12 +95,19 @@ class TaskIdeasMemory(ContextProvider):
     def _ensure_memory_file(self) -> None:
         """Create an empty memory file if it does not exist."""
         try:
+            logging.info(f"Ensuring memory file exists at: {self.memory_file}")
             self.memory_file.parent.mkdir(parents=True, exist_ok=True)
             if not self.memory_file.exists():
+                logging.info(f"Creating new memory file: {self.memory_file}")
                 with open(self.memory_file, "w") as f:
                     json.dump({"ideas": {}}, f, indent=2)
+                logging.info(f"✅ Memory file created successfully")
+            else:
+                logging.info(f"Memory file already exists")
         except Exception as e:
-            logging.warning(f"Unable to initialize memory file {self.memory_file}: {e}")
+            logging.error(f"❌ Unable to initialize memory file {self.memory_file}: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
     
     async def invoking(self, messages: ChatMessage | MutableSequence[ChatMessage], **kwargs: Any) -> Context:
         """Inject previously generated concepts as context before each invocation."""
@@ -230,6 +239,58 @@ async def get_k8s_task_idea_agent():
             thread = agent.get_new_thread()
 
         yield agent, memory, thread, thread_state_path
+
+
+async def create_idea_agent_with_mcp(mcp_tool):
+    """Create idea agent with an existing MCP tool.
+    
+    Args:
+        mcp_tool: An already initialized MCPStdioTool instance for K8s docs
+        
+    Returns:
+        Tuple of (agent, memory, thread, thread_state_path)
+    """
+    chat_client = AzureOpenAIChatClient(
+        endpoint=AZURE.endpoint,
+        deployment_name=AZURE.deployment_name,
+        credential=AzureCliCredential(),
+    )
+
+    message_store = ChatMessageStore()
+    memory = TaskIdeasMemory()
+    
+    agent = ChatAgent(
+        chat_client=chat_client,
+        instructions=(
+            "You are a Kubernetes task idea generator that creates detailed task concepts with three difficulty variations. "
+            "Read official K8s documentation and propose comprehensive learning concepts for a Kubernetes game. "
+            "\n\nYour task:\n"
+            "1. Choose ONE Kubernetes concept not yet covered (check context for existing concepts)\n"
+            "2. Generate exactly 3 variations: BEGINNER, INTERMEDIATE, and ADVANCED\n"
+            "3. Use 3-digit task IDs (001-999) in format: XXX_concept_name_level (e.g., 041_secrets_basic)\n"
+            "4. Each variation should build on the previous one with increasing complexity\n"
+            "5. Include practical, hands-on scenarios covering: Workloads, Services, Storage, Configuration, Security, Scheduling, Policies\n"
+            "\nThe response will be automatically structured - just provide the data."
+        ),
+        tools=[mcp_tool],
+        context_providers=[memory],
+        middleware=[LoggingFunctionMiddleware()],
+        chat_message_store_factory=lambda: message_store,
+    )
+
+    # Restore thread if saved
+    thread_state_path = Path(__file__).parent.parent / "task_ideas_thread.json"
+    if thread_state_path.exists():
+        try:
+            with open(thread_state_path, "r") as f:
+                thread_data = json.load(f)
+            thread = await agent.deserialize_thread(thread_data)
+        except Exception:
+            thread = agent.get_new_thread()
+    else:
+        thread = agent.get_new_thread()
+
+    return agent, memory, thread, thread_state_path
 
 
 if __name__ == "__main__":
