@@ -2,12 +2,12 @@
 
 ## Overview
 
-`workflow.py` implements a conditional workflow using Microsoft Agent Framework's `WorkflowBuilder` pattern. It generates Kubernetes learning tasks, validates them, runs tests, and automatically removes tasks that fail validation or tests.
+`workflow.py` implements a looping conditional workflow using Microsoft Agent Framework's `WorkflowBuilder` pattern. It generates multiple Kubernetes learning tasks, validates them, runs tests, and automatically removes tasks that fail validation or tests. The workflow loops until it reaches the configured maximum number of tasks.
 
 ## Quick Start
 
 ```bash
-# Run the workflow
+# Run the workflow (generates 3 tasks by default)
 source .venv/bin/activate
 python workflow.py
 
@@ -29,6 +29,9 @@ flowchart TD
   parse_tests_and_decide["parse_tests_and_decide"];
   keep_task["keep_task"];
   remove_task["remove_task"];
+  check_loop["check_loop"];
+  generate_next["generate_next"];
+  complete_workflow["complete_workflow"];
   generator_agent --> parse_generated_task;
   parse_generated_task --> create_validation_request;
   create_validation_request --> validator_agent;
@@ -38,6 +41,11 @@ flowchart TD
   pytest_agent --> parse_tests_and_decide;
   parse_tests_and_decide --> keep_task;
   parse_tests_and_decide --> remove_task;
+  keep_task --> check_loop;
+  remove_task --> check_loop;
+  check_loop --> generate_next;
+  check_loop --> complete_workflow;
+  generate_next --> generator_agent;
 ```
 
 ## Workflow Components
@@ -48,24 +56,36 @@ flowchart TD
 2. **validator_agent** - Validates task structure, YAML syntax, Python syntax, Jinja templates
 3. **pytest_agent** - Runs all tests in the task directory
 
-### Executors (7)
+### Executors (10)
 
 1. **parse_generated_task** - Parses generator response and extracts task ID
 2. **create_validation_request** - Creates validation request for validator agent
-3. **parse_validation_result** - Parses validation response into structured `ValidationResult`
+3. **parse_validation_result** - Parses validation response into structured `ValidationResult`, stores in shared state
 4. **create_pytest_request** - Creates pytest request for pytest agent
-5. **parse_tests_and_decide** - Parses test results, combines with validation, makes decision
+5. **parse_tests_and_decide** - Parses test results, retrieves validation from shared state, makes decision
 6. **keep_task** - Success path (validation + tests passed)
 7. **remove_task** - Failure path (deletes task directory)
+8. **check_loop** - Checks if should continue generating more tasks
+9. **generate_next** - Creates request for next task generation (loops back)
+10. **complete_workflow** - Terminates workflow when max tasks reached
 
 ### Conditional Logic
 
-- **Decision Point**: `parse_tests_and_decide`
+#### Decision Point 1: Keep vs Remove
+- **Executor**: `parse_tests_and_decide`
 - **Selection Function**: `select_action()`
 - **Logic**: `validation.is_valid AND test.is_valid`
 - **Routes to**:
   - `keep_task` if BOTH validation and tests pass ✅
   - `remove_task` if EITHER validation or tests fail ❌
+
+#### Decision Point 2: Continue vs Complete
+- **Executor**: `check_loop`
+- **Selection Function**: `select_loop_action()`
+- **Logic**: `task_count < max_tasks`
+- **Routes to**:
+  - `generate_next` if more tasks needed 🔄
+  - `complete_workflow` if max tasks reached 🏁
 
 ## Execution Flow
 
@@ -78,17 +98,23 @@ flowchart TD
    ↓
 4. Validate Task
    ↓
-5. Parse Validation Result
+5. Parse Validation Result (store in shared state)
    ↓
 6. Create Pytest Request
    ↓
 7. Run Tests
    ↓
-8. Parse Tests & Make Decision
+8. Parse Tests & Make Decision (retrieve validation from shared state)
    ↓
-9. Decision Point 🔀
+9. Decision Point 1 🔀
    ├─→ ✅ Keep Task (if validation=true AND tests=true)
    └─→ ❌ Remove Task (if validation=false OR tests=false)
+   ↓
+10. Check Loop Condition
+   ↓
+11. Decision Point 2 🔀
+   ├─→ 🔄 Generate Next (if task_count < max_tasks) → back to step 1
+   └─→ 🏁 Complete Workflow (if task_count >= max_tasks) → END
 ```
 
 ## Structured Output Models
@@ -117,11 +143,40 @@ class TestResult(BaseModel):
 class CombinedValidationResult:
     validation: ValidationResult
     test: TestResult
+    task_count: int = 0     # Current task count
+    max_tasks: int = 3      # Maximum tasks to generate
     
     @property
     def should_keep(self) -> bool:
         return self.validation.is_valid and self.test.is_valid
+    
+    @property
+    def should_continue(self) -> bool:
+        return self.task_count < self.max_tasks
 ```
+
+## Loop Implementation
+
+The workflow implements a loop using edges (not external Python loops):
+
+### Loop Structure
+```
+keep_task → check_loop → [generate_next OR complete_workflow]
+remove_task → check_loop → [generate_next OR complete_workflow]
+generate_next → generator_agent (loop back to start)
+```
+
+### Shared State Management
+- **task_count**: Tracks number of tasks processed (incremented in `parse_tests_and_decide`)
+- **max_tasks**: Maximum tasks to generate (default: 3)
+- **validation_{task_id}**: Stores validation results for retrieval during testing phase
+
+### Loop Termination
+The workflow terminates when:
+1. `task_count >= max_tasks`
+2. `check_loop` routes to `complete_workflow`
+3. `complete_workflow` yields output without sending messages
+4. Workflow becomes idle and ends naturally
 
 ## Example Output
 
@@ -129,15 +184,18 @@ class CombinedValidationResult:
 🚀 Starting workflow...
 [EXECUTOR] parse_generated_task: Extracting task ID...
 ✅ Extracted task ID: 001_configmap_env
-[EXECUTOR] create_validation_request: Creating validation request...
 [EXECUTOR] parse_validation_result: Parsing validation response...
 ✅ PASSED Validation: All required files present
-[EXECUTOR] create_pytest_request: Creating pytest request...
 [EXECUTOR] parse_tests_and_decide: Parsing test results...
 ❌ FAILED Tests: Tests failed
 🔀 DECISION: REMOVE task 001_configmap_env
 ❌ REMOVING TASK: 001_configmap_env
-🗑️ Deleted directory: /path/to/task
+   Tasks completed: 1/3
+🔄 CHECK_LOOP: Task count 1/3
+   → Will generate task 2
+🔄 LOOP: Generating task 2/3
+... (repeats for tasks 2 and 3)
+🏁 COMPLETE: Generated 3/3 tasks
 WORKFLOW COMPLETE
 ```
 
@@ -178,9 +236,12 @@ xdg-open workflow_graph.pdf
 | Validation | Manual | Automated with structured output |
 | Test Failures | Logged only | Automatically removes failed tasks |
 | Conditional Logic | None | Routes based on validation + tests |
-| State Management | Variables | Workflow messages |
+| Loop Implementation | External Python loop | Workflow edges with conditional routing |
+| Task Generation | Single task | Multiple tasks (configurable max) |
+| State Management | Variables | Shared state + message passing |
 | Extensibility | Limited | Easy to add more agents/steps |
 | Visualization | No | Yes (Mermaid, SVG, PNG, PDF) |
+| Termination | After 1 task | After max_tasks reached |
 
 ## Key Features
 
@@ -191,15 +252,21 @@ xdg-open workflow_graph.pdf
 
 ### 2. Conditional Routing
 - Uses `add_multi_selection_edge_group()` for branching
-- Decision based on combined validation + test results
+- Two decision points: keep/remove and continue/complete
 - Automatic cleanup of failed tasks
 
-### 3. Message Passing
-- Data flows through workflow messages (not shared state)
-- Each executor receives typed input and produces typed output
-- Follows Microsoft Agent Framework patterns
+### 3. Loop Implementation
+- Workflow loops using edges (not external Python loops)
+- Shared state tracks task count
+- Terminates naturally when max tasks reached
+- No infinite loops - guaranteed termination
 
-### 4. Automatic Cleanup
+### 4. State Management
+- **Shared State**: Stores task_count, max_tasks, and validation results
+- **Message Passing**: Data flows through typed workflow messages
+- **Hybrid Approach**: Uses both patterns appropriately
+
+### 5. Automatic Cleanup
 - Failed tasks are automatically deleted from filesystem
 - Uses absolute paths from `PATHS.tests_root`
 - Logs deletion for audit trail
@@ -236,13 +303,16 @@ xdg-open workflow_graph.pdf
 
 ## Workflow Characteristics
 
-- **Type**: Sequential with conditional branching
+- **Type**: Sequential with conditional branching and looping
 - **Agents**: 3 (Generator, Validator, Pytest)
-- **Executors**: 7 (parsing, request creation, decision)
-- **Decision Points**: 1 (keep vs remove)
-- **Branches**: 2 (success path, failure path)
-- **State Management**: Message passing (no shared state)
+- **Executors**: 10 (parsing, request creation, decision, loop control)
+- **Decision Points**: 2 (keep vs remove, continue vs complete)
+- **Branches**: 4 (keep, remove, generate_next, complete)
+- **Loop**: Edge-based with shared state tracking
+- **Max Tasks**: Configurable (default: 3)
+- **State Management**: Hybrid (shared state + message passing)
 - **Error Handling**: Automatic task removal on failure
+- **Termination**: Natural (workflow becomes idle)
 
 ## Future Enhancements
 

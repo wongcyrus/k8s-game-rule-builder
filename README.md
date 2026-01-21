@@ -59,8 +59,11 @@ devui entities
 # Option 2: Run the main agent pipeline (sequential)
 python main.py
 
-# Option 3: Run the workflow (conditional with validation)
+# Option 3: Run the workflow (conditional with validation, single task)
 python workflow.py
+
+# Option 4: Run the workflow loop (multiple tasks with statistics)
+python workflow_loop.py
 
 # Generate workflow visualization
 python visualize_workflow.py
@@ -84,10 +87,11 @@ The project includes several specialized AI agents that work together:
 
 ### Workflows
 
-The project supports two execution modes:
+The project supports multiple execution modes:
 
 1. **main.py** - Sequential pipeline (idea → generate → test)
-2. **workflow.py** - Conditional workflow with validation and automatic cleanup
+2. **workflow.py** - Conditional workflow with validation (single task)
+3. **workflow_loop.py** - Workflow loop for multiple tasks with statistics
 
 See [WORKFLOW.md](WORKFLOW.md) for detailed workflow documentation including:
 - Workflow architecture and visualization
@@ -141,27 +145,33 @@ k8s-game-rule-builder/
    python main.py
    ```
 
-3. **Run the conditional workflow (with validation):**
+3. **Run the conditional workflow (single task):**
    ```bash
    source .venv/bin/activate
    python workflow.py
    ```
 
-4. **Launch DevUI (Interactive UI):**
+4. **Run the workflow loop (multiple tasks):**
+   ```bash
+   source .venv/bin/activate
+   python workflow_loop.py
+   ```
+
+5. **Launch DevUI (Interactive UI):**
    ```bash
    source .venv/bin/activate
    devui entities
    # Open browser to http://localhost:8000
    ```
 
-5. **Generate workflow visualization:**
+6. **Generate workflow visualization:**
    ```bash
    source .venv/bin/activate
    python visualize_workflow.py
    # Creates: workflow_graph.svg, workflow_graph.png, workflow_graph.pdf
    ```
 
-6. **Generate task ideas:**
+7. **Generate task ideas:**
    ```bash
    python -m agents.k8s_task_idea_agent
    ```

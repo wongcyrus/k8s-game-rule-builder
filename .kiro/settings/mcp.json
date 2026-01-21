@@ -1,4 +1,12 @@
 {
   "mcpServers": {
+    "microsoft-learn": {
+      "type": "http",
+      "url": "https://learn.microsoft.com/api/mcp",
+      "disabled": false,
+      "autoApprove": [
+        "microsoft_docs_search"
+      ]
+    }
   }
 }

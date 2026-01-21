@@ -14,6 +14,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Any
+from typing_extensions import Never
 from pydantic import BaseModel, Field
 
 from agent_framework import (
@@ -66,11 +67,18 @@ class CombinedValidationResult:
     """Combined validation and test results for decision making."""
     validation: ValidationResult
     test: TestResult
+    task_count: int = 0  # Track number of tasks processed
+    max_tasks: int = 3   # Maximum tasks to generate
     
     @property
     def should_keep(self) -> bool:
         """Decision: keep task only if both validation and tests pass."""
         return self.validation.is_valid and self.test.is_valid
+    
+    @property
+    def should_continue(self) -> bool:
+        """Decision: continue generating more tasks."""
+        return self.task_count < self.max_tasks
 
 
 @dataclass
@@ -168,6 +176,9 @@ async def parse_validation_result(response: AgentExecutorResponse, ctx: Workflow
         status = "✅ PASSED" if validation.is_valid else "❌ FAILED"
         logging.info(f"{status} Validation: {validation.reason}")
         
+        # Store validation result in shared state for later retrieval
+        await ctx.set_shared_state(f"validation_{validation.task_id}", validation)
+        
         # Create TaskWithValidation
         task_with_val = TaskWithValidation(
             task_id=validation.task_id,
@@ -230,17 +241,40 @@ async def parse_tests_and_decide(response: AgentExecutorResponse, ctx: WorkflowC
     status = "✅ PASSED" if test_result.is_valid else "❌ FAILED"
     logging.info(f"{status} Tests: {test_result.reason}")
     
-    # For now, create a dummy validation (we'll fix this with proper state management)
-    # In a real scenario, we'd retrieve the stored validation
-    validation = ValidationResult(
-        is_valid=True,  # Assume validation passed if we got here
-        reason="Validation passed",
-        task_id=task_id,
-        task_directory=task_directory
-    )
+    # Retrieve validation result from shared state
+    try:
+        validation = await ctx.get_shared_state(f"validation_{task_id}")
+    except KeyError:
+        # Fallback: assume validation passed if we got to testing phase
+        logging.warning(f"⚠️  Validation result not found for {task_id}, assuming passed")
+        validation = ValidationResult(
+            is_valid=True,
+            reason="Validation passed (assumed)",
+            task_id=task_id,
+            task_directory=task_directory
+        )
     
-    # Combine results
-    combined = CombinedValidationResult(validation=validation, test=test_result)
+    # Get and increment task count
+    try:
+        task_count = await ctx.get_shared_state("task_count")
+        task_count += 1
+    except KeyError:
+        task_count = 1
+    await ctx.set_shared_state("task_count", task_count)
+    
+    # Get max tasks configuration
+    try:
+        max_tasks = await ctx.get_shared_state("max_tasks")
+    except KeyError:
+        max_tasks = 3
+    
+    # Combine results for decision
+    combined = CombinedValidationResult(
+        validation=validation,
+        test=test_result,
+        task_count=task_count,
+        max_tasks=max_tasks
+    )
     
     decision = "KEEP" if combined.should_keep else "REMOVE"
     logging.info(f"\n🔀 DECISION: {decision} task {task_id}")
@@ -269,22 +303,47 @@ def select_action(combined: CombinedValidationResult, target_ids: list[str]) -> 
         return [remove_task_id]
 
 
+# Selection function for loop routing
+def select_loop_action(combined: CombinedValidationResult, target_ids: list[str]) -> list[str]:
+    """Select whether to continue loop or complete workflow.
+    
+    Args:
+        combined: Combined validation and test results
+        target_ids: [generate_next_id, complete_workflow_id]
+    
+    Returns:
+        List containing the selected target ID
+    """
+    generate_next_id, complete_workflow_id = target_ids
+    
+    if combined.should_continue:
+        logging.info(f"🔄 Routing to GENERATE_NEXT (task {combined.task_count + 1}/{combined.max_tasks})")
+        return [generate_next_id]
+    else:
+        logging.info(f"🏁 Routing to COMPLETE_WORKFLOW ({combined.task_count}/{combined.max_tasks} tasks done)")
+        return [complete_workflow_id]
+
+
 # Executor: Keep task (success path)
 @executor(id="keep_task")
-async def keep_task(combined: CombinedValidationResult, ctx: WorkflowContext[str]) -> None:
+async def keep_task(combined: CombinedValidationResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
     """Keep the task - it passed all checks."""
     logging.info(f"\n✅ KEEPING TASK: {combined.test.task_id}")
     logging.info(f"   Validation: {combined.validation.reason}")
     logging.info(f"   Tests: {combined.test.reason}")
+    logging.info(f"   Tasks completed: {combined.task_count}/{combined.max_tasks}")
     
     await ctx.yield_output(
         f"✅ Task {combined.test.task_id} passed all checks and has been kept."
     )
+    
+    # Send message to check_loop
+    await ctx.send_message(combined)
 
 
 # Executor: Remove task (failure path)
 @executor(id="remove_task")
-async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[str]) -> None:
+async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
     """Remove the task - it failed validation or tests."""
     logging.info(f"\n❌ REMOVING TASK: {combined.test.task_id}")
     
@@ -295,6 +354,7 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[s
         reasons.append(f"Tests failed: {combined.test.reason}")
     
     logging.info(f"   Reasons: {'; '.join(reasons)}")
+    logging.info(f"   Tasks completed: {combined.task_count}/{combined.max_tasks}")
     
     # Actually remove the directory - use absolute path
     task_path = PATHS.tests_root / "game02" / combined.test.task_id
@@ -307,6 +367,55 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[s
     await ctx.yield_output(
         f"❌ Task {combined.test.task_id} failed checks and has been removed. Reasons: {'; '.join(reasons)}"
     )
+    
+    # Send message to check_loop
+    await ctx.send_message(combined)
+
+
+# Executor: Check if should loop back
+@executor(id="check_loop")
+async def check_loop(combined: CombinedValidationResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
+    """Check if we should loop back to generate another task."""
+    logging.info(f"\n🔄 CHECK_LOOP: Task count {combined.task_count}/{combined.max_tasks}")
+    
+    if combined.should_continue:
+        logging.info(f"   → Will generate task {combined.task_count + 1}")
+    else:
+        logging.info(f"   → Reached max tasks, will complete")
+    
+    # Always send message - routing will decide what to do
+    await ctx.send_message(combined)
+
+
+# Executor: Generate next task (loop back)
+@executor(id="generate_next")
+async def generate_next(combined: CombinedValidationResult, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
+    """Generate the next task in the loop."""
+    logging.info(f"\n🔄 LOOP: Generating task {combined.task_count + 1}/{combined.max_tasks}")
+    
+    generation_prompt = (
+        f"Generate a complete Kubernetes learning task with a unique ID in format '###_concept_name'. "
+        f"This is task {combined.task_count + 1} of {combined.max_tasks}. "
+        f"Create ALL required files including __init__.py, instruction.md, session.json, "
+        f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
+        f"test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+        f"Use proper Jinja template variables and follow all established patterns."
+    )
+    
+    await ctx.send_message(
+        AgentExecutorRequest(
+            messages=[ChatMessage(Role.USER, text=generation_prompt)],
+            should_respond=True
+        )
+    )
+
+
+# Executor: Complete workflow (end loop)
+@executor(id="complete_workflow")
+async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowContext[Never, str]) -> None:
+    """Complete the workflow - max tasks reached."""
+    logging.info(f"\n🏁 COMPLETE: Generated {combined.task_count}/{combined.max_tasks} tasks")
+    await ctx.yield_output(f"🏁 Workflow complete: {combined.task_count} tasks processed")
 
 
 async def main():
@@ -332,7 +441,7 @@ async def main():
         pytest_agent = get_pytest_agent()
         pytest_executor = AgentExecutor(pytest_agent, id="pytest_agent")
         
-        # Build workflow with conditional logic
+        # Build workflow with conditional logic and loop
         workflow = (
             WorkflowBuilder()
             .set_start_executor(generator_executor)
@@ -348,8 +457,28 @@ async def main():
                 [keep_task, remove_task],
                 selection_func=select_action,
             )
+            # Add loop edges - both keep and remove go to check_loop
+            .add_edge(keep_task, check_loop)
+            .add_edge(remove_task, check_loop)
+            # check_loop routes to either generate_next or complete_workflow
+            .add_multi_selection_edge_group(
+                check_loop,
+                [generate_next, complete_workflow],
+                selection_func=select_loop_action,
+            )
+            # generate_next loops back to generator
+            .add_edge(generate_next, generator_executor)
             .build()
         )
+        
+        # Initialize task count in workflow
+        logging.info("\n🔄 Workflow configured with loop")
+        logging.info(f"   Will generate up to 3 tasks")
+        logging.info(f"   Loop structure:")
+        logging.info(f"     keep_task → check_loop → [generate_next OR complete_workflow]")
+        logging.info(f"     remove_task → check_loop → [generate_next OR complete_workflow]")
+        logging.info(f"     generate_next → generator_agent (loop back)")
+        logging.info(f"     complete_workflow → END")
         
         # Generate workflow visualization
         logging.info("\n" + "="*80)
