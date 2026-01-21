@@ -10,7 +10,7 @@ AI-powered Kubernetes learning task generation with validation and testing workf
 # Setup
 bash setup.sh
 
-# Run workflow (generates 3 tasks with loop)
+# Run workflow (generates 1 task with retry on failure)
 python workflow.py
 
 # Generate workflow visualization
@@ -25,8 +25,9 @@ python visualize_workflow.py
 | File | Purpose |
 |------|---------|
 | [README.md](README.md) | Quick start and overview |
-| [WORKFLOW.md](WORKFLOW.md) | Workflow architecture with loop implementation |
-| [entities/README.md](entities/README.md) | DevUI entities guide |
+| [WORKFLOW.md](WORKFLOW.md) | Workflow architecture with retry loop |
+| [CHANGELOG.md](CHANGELOG.md) | Version history and recent changes |
+| [docs/RETRY_LOGIC.md](docs/RETRY_LOGIC.md) | Detailed retry implementation guide |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Technical deep dive |
 
 ## Project Structure
@@ -51,10 +52,12 @@ k8s-game-rule-builder/
 ## Key Features
 
 - **AI-Powered Generation**: Azure OpenAI agents create K8s learning tasks
-- **Looping Workflow**: Generates multiple tasks (configurable max: 3)
-- **Conditional Routing**: Two decision points (keep/remove, continue/complete)
+- **Retry Loop**: Generates 1 task with automatic retry on failure (max 3 retries)
+- **Topic-Focused**: Each run targets a specific Kubernetes concept
+- **Conditional Routing**: Two decision points (keep/remove, retry/complete)
 - **Automatic Cleanup**: Removes failed tasks from filesystem
-- **Shared State**: Tracks task count and validation results
+- **Duplicate Prevention**: Lists existing tasks to avoid ID conflicts
+- **Shared State**: Tracks retry count and validation results
 - **Interactive DevUI**: Web interface for agents and workflows
 - **Visualization**: Mermaid, SVG, PNG, PDF workflow diagrams
 - **Structured Output**: Type-safe Pydantic models
@@ -68,28 +71,29 @@ k8s-game-rule-builder/
 ## Workflow Architecture
 
 ```
-Generate → Validate → Test → Decision 1 (Keep/Remove) → Decision 2 (Continue/Complete)
+Generate → Validate → Test → Decision 1 (Keep/Remove) → Decision 2 (Retry/Complete)
                                                               ↓
-                                                         Loop Back
+                                                         Loop Back (Retry)
 ```
 
-### Loop Structure
+### Retry Loop Structure
 ```
-keep_task → check_loop → [generate_next OR complete_workflow]
-remove_task → check_loop → [generate_next OR complete_workflow]
-generate_next → generator_agent (loop back)
+keep_task → check_loop → complete_workflow (SUCCESS)
+remove_task → check_loop → [retry_generation OR complete_workflow]
+retry_generation → generator_agent (loop back)
 complete_workflow → END
 ```
 
 ### Decision Logic
 1. **Keep vs Remove**: `validation.is_valid AND test.is_valid`
-2. **Continue vs Complete**: `task_count < max_tasks`
+2. **Retry vs Complete**: `NOT should_keep AND retry_count < max_retries`
 
 ### Workflow Components
 - **3 Agents**: Generator, Validator, Pytest
-- **10 Executors**: Parse, create requests, decision-making, loop control
-- **2 Decision Points**: Keep/remove tasks, continue/complete workflow
-- **Max Tasks**: 3 (configurable in `workflow.py`)
+- **10 Executors**: Parse, create requests, decision-making, retry control
+- **2 Decision Points**: Keep/remove tasks, retry/complete workflow
+- **Max Retries**: 3 (configurable in `workflow.py`)
+- **Goal**: Generate 1 successful task (not multiple tasks)
 
 ## DevUI
 
@@ -102,24 +106,35 @@ python launch_devui_full.py
 ```
 
 **Registered Entities (4):**
-- ✅ **K8s Task Workflow** - Full workflow with loop
+- ✅ **K8s Task Workflow** - Full workflow with retry loop
 - ✅ **Generator Agent** - Creates K8s tasks with MCP filesystem
 - ✅ **Validator Agent** - Validates task structure and syntax
 - ✅ **Pytest Agent** - Runs tests on tasks
 
 **Features:**
 - Same as workflow.py
-- Loop functionality (generates 3 tasks)
+- Retry loop (up to 3 attempts)
+- Topic-focused generation
 - Two decision points
 - Shared state management
 - ⚠️ **k8s_generator_agent** - Placeholder (requires async context)
 
 ## Configuration
 
-### Max Tasks
-Edit `workflow.py`:
+### Target Topic
+Edit `workflow.py` main():
 ```python
-max_tasks: int = 3  # Change to desired number
+target_topic = "ConfigMaps and environment variables"  # Change to desired topic
+```
+
+### Max Retries
+Edit `workflow.py` main():
+```python
+initial_state = {
+    "target_topic": target_topic,
+    "retry_count": 0,
+    "max_retries": 3  # Change to desired number
+}
 ```
 
 ### Paths
@@ -151,13 +166,16 @@ PATHS = PathConfig(
 ## Status
 
 ✅ All systems operational
-- Looping workflow implemented and tested
+- Retry loop implemented and tested
+- Topic-focused generation working
+- Duplicate prevention via existing task list
 - Edge-based loop with guaranteed termination
 - Shared state management working
 - DevUI entities loading correctly
 - Documentation updated
 - Visualization generating properly
 - **Thread management fix applied** - All agents use in-memory conversation management
+- **Prompt logic reviewed** - All prompts work with retry loop and topic input
 
 ## Troubleshooting
 
@@ -201,4 +219,30 @@ agent = chat_client.as_agent(...)
 - **AzureOpenAIResponsesClient**: Server-side thread persistence (causes loop issues)
 - **AzureOpenAIChatClient**: In-memory conversation management (works with loops)
 
-**Result**: ✅ Workflow successfully completes all 3 task generations without errors
+**Result**: ✅ Workflow successfully completes retry loop without errors
+
+---
+
+### Workflow Logic Update (2026-01-21)
+
+**Changes**: Converted from multi-task generation to single-task with retry
+
+**Before**:
+- Generated multiple tasks (up to max_tasks = 3)
+- Used thread-based deduplication
+- Continued until max_tasks reached
+
+**After**:
+- Generates 1 task with retry on failure
+- Uses explicit existing task list for deduplication
+- Stops on first success OR max retries reached
+- Topic-focused generation
+
+**Key Improvements**:
+1. **Retry Logic**: `retry_count` instead of `task_count`
+2. **Topic Input**: Each run targets a specific Kubernetes concept
+3. **Duplicate Prevention**: Lists existing tasks in prompt
+4. **Stop on Success**: No need to generate multiple tasks
+5. **Independent Iterations**: No thread persistence required
+
+**See**: [WORKFLOW_CHANGES.md](WORKFLOW_CHANGES.md) for detailed changes

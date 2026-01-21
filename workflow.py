@@ -67,8 +67,8 @@ class CombinedValidationResult:
     """Combined validation and test results for decision making."""
     validation: ValidationResult
     test: TestResult
-    task_count: int = 0  # Track number of tasks processed
-    max_tasks: int = 3   # Maximum tasks to generate
+    retry_count: int = 0  # Track number of retry attempts
+    max_retries: int = 3  # Maximum retry attempts
     
     @property
     def should_keep(self) -> bool:
@@ -76,9 +76,9 @@ class CombinedValidationResult:
         return self.validation.is_valid and self.test.is_valid
     
     @property
-    def should_continue(self) -> bool:
-        """Decision: continue generating more tasks."""
-        return self.task_count < self.max_tasks
+    def should_retry(self) -> bool:
+        """Decision: retry if task failed and haven't exceeded max retries."""
+        return not self.should_keep and self.retry_count < self.max_retries
 
 
 @dataclass
@@ -122,6 +122,13 @@ async def parse_generated_task(response: AgentExecutorResponse, ctx: WorkflowCon
         await ctx.send_message(task_info)
     else:
         logging.error("❌ Could not extract task ID from generation response")
+        # Increment retry count
+        try:
+            retry_count = await ctx.get_shared_state("retry_count")
+            retry_count += 1
+        except KeyError:
+            retry_count = 1
+        await ctx.set_shared_state("retry_count", retry_count)
         raise ValueError("Failed to parse task ID from generation")
 
 
@@ -228,12 +235,43 @@ async def parse_tests_and_decide(response: AgentExecutorResponse, ctx: WorkflowC
     task_id = task_id_match.group(1) if task_id_match else "unknown"
     task_directory = f"tests/game02/{task_id}"
     
-    # Parse test result
-    is_valid = "passed" in text.lower() and "failed" not in text.lower()
+    # Parse test result - look for pytest success indicators
+    # Check for explicit success messages or passed count
+    is_valid = False
+    reason = "Tests failed"
+    
+    # Look for pytest success patterns
+    if "all tests passed" in text.lower():
+        is_valid = True
+        reason = "All tests passed"
+    elif re.search(r'passed.*✅.*\d+', text, re.IGNORECASE):
+        # Look for "Passed: ✅ X" pattern
+        passed_match = re.search(r'passed.*✅.*(\d+)', text, re.IGNORECASE)
+        failed_match = re.search(r'failed.*❌.*(\d+)', text, re.IGNORECASE)
+        if passed_match and failed_match:
+            passed_count = int(passed_match.group(1))
+            failed_count = int(failed_match.group(1))
+            if passed_count > 0 and failed_count == 0:
+                is_valid = True
+                reason = f"All {passed_count} tests passed"
+            else:
+                reason = f"{failed_count} tests failed, {passed_count} passed"
+    elif re.search(r'\d+\s+passed', text, re.IGNORECASE):
+        # Look for "X passed" in pytest output
+        passed_match = re.search(r'(\d+)\s+passed', text, re.IGNORECASE)
+        failed_match = re.search(r'(\d+)\s+failed', text, re.IGNORECASE)
+        if passed_match:
+            passed_count = int(passed_match.group(1))
+            failed_count = int(failed_match.group(1)) if failed_match else 0
+            if passed_count > 0 and failed_count == 0:
+                is_valid = True
+                reason = f"All {passed_count} tests passed"
+            else:
+                reason = f"{failed_count} tests failed, {passed_count} passed"
     
     test_result = TestResult(
         is_valid=is_valid,
-        reason="Tests passed" if is_valid else "Tests failed",
+        reason=reason,
         task_id=task_id,
         task_directory=task_directory
     )
@@ -254,30 +292,29 @@ async def parse_tests_and_decide(response: AgentExecutorResponse, ctx: WorkflowC
             task_directory=task_directory
         )
     
-    # Get and increment task count
+    # Get retry count
     try:
-        task_count = await ctx.get_shared_state("task_count")
-        task_count += 1
+        retry_count = await ctx.get_shared_state("retry_count")
     except KeyError:
-        task_count = 1
-    await ctx.set_shared_state("task_count", task_count)
+        retry_count = 0
     
-    # Get max tasks configuration
+    # Get max retries configuration
     try:
-        max_tasks = await ctx.get_shared_state("max_tasks")
+        max_retries = await ctx.get_shared_state("max_retries")
     except KeyError:
-        max_tasks = 3
+        max_retries = 3
     
     # Combine results for decision
     combined = CombinedValidationResult(
         validation=validation,
         test=test_result,
-        task_count=task_count,
-        max_tasks=max_tasks
+        retry_count=retry_count,
+        max_retries=max_retries
     )
     
     decision = "KEEP" if combined.should_keep else "REMOVE"
     logging.info(f"\n🔀 DECISION: {decision} task {task_id}")
+    logging.info(f"   Retry count: {retry_count}/{max_retries}")
     
     await ctx.send_message(combined)
 
@@ -305,22 +342,25 @@ def select_action(combined: CombinedValidationResult, target_ids: list[str]) -> 
 
 # Selection function for loop routing
 def select_loop_action(combined: CombinedValidationResult, target_ids: list[str]) -> list[str]:
-    """Select whether to continue loop or complete workflow.
+    """Select whether to retry generation or complete workflow.
     
     Args:
         combined: Combined validation and test results
-        target_ids: [generate_next_id, complete_workflow_id]
+        target_ids: [retry_generation_id, complete_workflow_id]
     
     Returns:
         List containing the selected target ID
     """
-    generate_next_id, complete_workflow_id = target_ids
+    retry_generation_id, complete_workflow_id = target_ids
     
-    if combined.should_continue:
-        logging.info(f"🔄 Routing to GENERATE_NEXT (task {combined.task_count + 1}/{combined.max_tasks})")
-        return [generate_next_id]
+    if combined.should_retry:
+        logging.info(f"🔄 Routing to RETRY_GENERATION (attempt {combined.retry_count + 1}/{combined.max_retries})")
+        return [retry_generation_id]
     else:
-        logging.info(f"🏁 Routing to COMPLETE_WORKFLOW ({combined.task_count}/{combined.max_tasks} tasks done)")
+        if combined.should_keep:
+            logging.info(f"🏁 Routing to COMPLETE_WORKFLOW (task successful)")
+        else:
+            logging.info(f"🏁 Routing to COMPLETE_WORKFLOW (max retries reached: {combined.retry_count}/{combined.max_retries})")
         return [complete_workflow_id]
 
 
@@ -331,7 +371,7 @@ async def keep_task(combined: CombinedValidationResult, ctx: WorkflowContext[Com
     logging.info(f"\n✅ KEEPING TASK: {combined.test.task_id}")
     logging.info(f"   Validation: {combined.validation.reason}")
     logging.info(f"   Tests: {combined.test.reason}")
-    logging.info(f"   Tasks completed: {combined.task_count}/{combined.max_tasks}")
+    logging.info(f"   Retry attempts: {combined.retry_count}")
     
     await ctx.yield_output(
         f"✅ Task {combined.test.task_id} passed all checks and has been kept."
@@ -354,7 +394,7 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[C
         reasons.append(f"Tests failed: {combined.test.reason}")
     
     logging.info(f"   Reasons: {'; '.join(reasons)}")
-    logging.info(f"   Tasks completed: {combined.task_count}/{combined.max_tasks}")
+    logging.info(f"   Retry attempts: {combined.retry_count}/{combined.max_retries}")
     
     # Actually remove the directory - use absolute path
     task_path = PATHS.tests_root / "game02" / combined.test.task_id
@@ -363,6 +403,10 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[C
         logging.info(f"   🗑️  Deleted directory: {task_path}")
     else:
         logging.warning(f"   ⚠️  Directory not found: {task_path}")
+    
+    # Increment retry count for next attempt
+    retry_count = combined.retry_count + 1
+    await ctx.set_shared_state("retry_count", retry_count)
     
     await ctx.yield_output(
         f"❌ Task {combined.test.task_id} failed checks and has been removed. Reasons: {'; '.join(reasons)}"
@@ -375,35 +419,51 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[C
 # Executor: Check if should loop back
 @executor(id="check_loop")
 async def check_loop(combined: CombinedValidationResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
-    """Check if we should loop back to generate another task."""
-    logging.info(f"\n🔄 CHECK_LOOP: Task count {combined.task_count}/{combined.max_tasks}")
+    """Check if we should retry or complete the workflow."""
+    logging.info(f"\n🔄 CHECK_LOOP: Retry count {combined.retry_count}/{combined.max_retries}")
     
-    if combined.should_continue:
-        logging.info(f"   → Will generate task {combined.task_count + 1}")
+    if combined.should_keep:
+        logging.info(f"   → Task successful, will complete")
+    elif combined.should_retry:
+        logging.info(f"   → Will retry generation (attempt {combined.retry_count + 1})")
     else:
-        logging.info(f"   → Reached max tasks, will complete")
+        logging.info(f"   → Max retries reached, will complete")
     
     # Always send message - routing will decide what to do
     await ctx.send_message(combined)
 
 
-# Executor: Generate next task (loop back)
-@executor(id="generate_next")
-async def generate_next(combined: CombinedValidationResult, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
-    """Generate the next task in the loop.
+# Executor: Retry generation (loop back)
+@executor(id="retry_generation")
+async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
+    """Retry task generation after a failure.
     
-    Note: The generator AgentExecutor's conversation history is managed by the workflow.
-    Each loop iteration sends a fresh request, and the executor handles thread management.
+    Note: Each retry creates a fresh request. The generator uses AzureOpenAIChatClient
+    which manages conversation in-memory, so each iteration is independent.
     """
-    logging.info(f"\n🔄 LOOP: Generating task {combined.task_count + 1}/{combined.max_tasks}")
+    logging.info(f"\n🔄 RETRY: Attempt {combined.retry_count + 1}/{combined.max_retries}")
+    
+    # Get the target topic from shared state
+    try:
+        target_topic = await ctx.get_shared_state("target_topic")
+    except KeyError:
+        target_topic = "a Kubernetes concept"
+    
+    # Get list of existing task IDs to avoid duplication
+    game02_dir = PATHS.tests_root / "game02"
+    existing_tasks = []
+    if game02_dir.exists():
+        existing_tasks = [d.name for d in game02_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
     
     generation_prompt = (
-        f"Generate a complete Kubernetes learning task with a unique ID in format '###_concept_name'. "
-        f"This is task {combined.task_count + 1} of {combined.max_tasks}. "
-        f"Create ALL required files including __init__.py, instruction.md, session.json, "
+        f"Generate a complete Kubernetes learning task about '{target_topic}' with a unique ID in format '###_concept_name'. "
+        f"This is retry attempt {combined.retry_count + 1} of {combined.max_retries}. "
+        f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
+        f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
         f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
         f"test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
-        f"Use proper Jinja template variables and follow all established patterns."
+        f"Use proper Jinja template variables and follow all established patterns. "
+        f"Make sure all files are syntactically correct and tests will pass."
     )
     
     await ctx.send_message(
@@ -417,9 +477,13 @@ async def generate_next(combined: CombinedValidationResult, ctx: WorkflowContext
 # Executor: Complete workflow (end loop)
 @executor(id="complete_workflow")
 async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowContext[Never, str]) -> None:
-    """Complete the workflow - max tasks reached."""
-    logging.info(f"\n🏁 COMPLETE: Generated {combined.task_count}/{combined.max_tasks} tasks")
-    await ctx.yield_output(f"🏁 Workflow complete: {combined.task_count} tasks processed")
+    """Complete the workflow - either success or max retries reached."""
+    if combined.should_keep:
+        logging.info(f"\n🏁 COMPLETE: Task {combined.test.task_id} successfully generated after {combined.retry_count} retries")
+        await ctx.yield_output(f"🏁 Workflow complete: Task {combined.test.task_id} successfully generated")
+    else:
+        logging.info(f"\n🏁 COMPLETE: Failed to generate valid task after {combined.retry_count} retries")
+        await ctx.yield_output(f"🏁 Workflow complete: Failed to generate valid task after {combined.retry_count} retries")
 
 
 async def main():
@@ -445,7 +509,7 @@ async def main():
         pytest_agent = get_pytest_agent()
         pytest_executor = AgentExecutor(pytest_agent, id="pytest_agent")
         
-        # Build workflow with conditional logic and loop
+        # Build workflow with conditional logic and retry loop
         workflow = (
             WorkflowBuilder()
             .set_start_executor(generator_executor)
@@ -464,24 +528,24 @@ async def main():
             # Add loop edges - both keep and remove go to check_loop
             .add_edge(keep_task, check_loop)
             .add_edge(remove_task, check_loop)
-            # check_loop routes to either generate_next or complete_workflow
+            # check_loop routes to either retry_generation or complete_workflow
             .add_multi_selection_edge_group(
                 check_loop,
-                [generate_next, complete_workflow],
+                [retry_generation, complete_workflow],
                 selection_func=select_loop_action,
             )
-            # generate_next loops back to generator
-            .add_edge(generate_next, generator_executor)
+            # retry_generation loops back to generator
+            .add_edge(retry_generation, generator_executor)
             .build()
         )
         
-        # Initialize task count in workflow
-        logging.info("\n🔄 Workflow configured with loop")
-        logging.info(f"   Will generate up to 3 tasks")
+        # Initialize workflow configuration
+        logging.info("\n🔄 Workflow configured with retry loop")
+        logging.info(f"   Max retries: 3")
         logging.info(f"   Loop structure:")
-        logging.info(f"     keep_task → check_loop → [generate_next OR complete_workflow]")
-        logging.info(f"     remove_task → check_loop → [generate_next OR complete_workflow]")
-        logging.info(f"     generate_next → generator_agent (loop back)")
+        logging.info(f"     keep_task → check_loop → complete_workflow (success)")
+        logging.info(f"     remove_task → check_loop → [retry_generation OR complete_workflow]")
+        logging.info(f"     retry_generation → generator_agent (loop back)")
         logging.info(f"     complete_workflow → END")
         
         # Generate workflow visualization
@@ -524,17 +588,30 @@ async def main():
         
         logging.info("\n" + "="*80)
         
-        # Run workflow
+        # Run workflow with topic parameter
+        target_topic = "ConfigMaps and environment variables"  # Can be parameterized
+        
+        # Get list of existing task IDs to avoid duplication
+        game02_dir = PATHS.tests_root / "game02"
+        existing_tasks = []
+        if game02_dir.exists():
+            existing_tasks = [d.name for d in game02_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
+        
         task_prompt = (
-            "Generate a complete Kubernetes learning task with a unique ID in format '###_concept_name'. "
-            "Create ALL required files including __init__.py, instruction.md, session.json, "
-            "setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
-            "test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
-            "Use proper Jinja template variables and follow all established patterns."
+            f"Generate a complete Kubernetes learning task about '{target_topic}' with a unique ID in format '###_concept_name'. "
+            f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
+            f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
+            f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
+            f"test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+            f"Use proper Jinja template variables and follow all established patterns. "
+            f"Make sure all files are syntactically correct and tests will pass."
         )
         
-        logging.info("\n🚀 Starting workflow...")
-        async for event in workflow.run_stream(task_prompt):
+        logging.info(f"\n🚀 Starting workflow for topic: {target_topic}")
+        logging.info(f"   Existing tasks: {len(existing_tasks)}")
+        
+        # Store target topic in workflow context for retry attempts
+        async for event in workflow.run_stream(task_prompt, initial_state={"target_topic": target_topic, "retry_count": 0, "max_retries": 3}):
             if isinstance(event, WorkflowEvent):
                 if event.data:  # Only log non-empty events
                     logging.info(f"\n📤 Workflow output: {event.data}")

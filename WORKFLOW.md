@@ -2,12 +2,12 @@
 
 ## Overview
 
-`workflow.py` implements a looping conditional workflow using Microsoft Agent Framework's `WorkflowBuilder` pattern. It generates multiple Kubernetes learning tasks, validates them, runs tests, and automatically removes tasks that fail validation or tests. The workflow loops until it reaches the configured maximum number of tasks.
+`workflow.py` implements a retry-based conditional workflow using Microsoft Agent Framework's `WorkflowBuilder` pattern. It generates a single Kubernetes learning task with automatic retry on failure. The workflow validates the task, runs tests, and automatically removes tasks that fail validation or tests, then retries until success or max retries reached.
 
 ## Quick Start
 
 ```bash
-# Run the workflow (generates 3 tasks by default)
+# Run the workflow (generates 1 task with retry on failure)
 source .venv/bin/activate
 python workflow.py
 
@@ -29,14 +29,15 @@ python launch_devui_full.py
 ```
 
 **Registered Entities:**
-- ✅ K8s Task Workflow (with loop)
+- ✅ K8s Task Workflow (with retry loop)
 - ✅ Generator Agent (with MCP filesystem)
 - ✅ Validator Agent
 - ✅ Pytest Agent
 
 **Features:**
-- Loop functionality (generates 3 tasks)
-- Two decision points (keep/remove, continue/complete)
+- Retry loop (up to 3 attempts)
+- Topic-focused generation
+- Two decision points (keep/remove, retry/complete)
 - Shared state management
 - Same as workflow.py
 
@@ -55,7 +56,7 @@ flowchart TD
   keep_task["keep_task"];
   remove_task["remove_task"];
   check_loop["check_loop"];
-  generate_next["generate_next"];
+  retry_generation["retry_generation"];
   complete_workflow["complete_workflow"];
   generator_agent --> parse_generated_task;
   parse_generated_task --> create_validation_request;
@@ -68,9 +69,9 @@ flowchart TD
   parse_tests_and_decide --> remove_task;
   keep_task --> check_loop;
   remove_task --> check_loop;
-  check_loop --> generate_next;
+  check_loop --> retry_generation;
   check_loop --> complete_workflow;
-  generate_next --> generator_agent;
+  retry_generation --> generator_agent;
 ```
 
 ## Workflow Components
@@ -89,10 +90,10 @@ flowchart TD
 4. **create_pytest_request** - Creates pytest request for pytest agent
 5. **parse_tests_and_decide** - Parses test results, retrieves validation from shared state, makes decision
 6. **keep_task** - Success path (validation + tests passed)
-7. **remove_task** - Failure path (deletes task directory)
-8. **check_loop** - Checks if should continue generating more tasks
-9. **generate_next** - Creates request for next task generation (loops back)
-10. **complete_workflow** - Terminates workflow when max tasks reached
+7. **remove_task** - Failure path (deletes task directory, increments retry_count)
+8. **check_loop** - Checks if should retry or complete
+9. **retry_generation** - Creates request for retry generation with topic and existing tasks (loops back)
+10. **complete_workflow** - Terminates workflow on success or max retries
 
 ### Conditional Logic
 
@@ -104,13 +105,13 @@ flowchart TD
   - `keep_task` if BOTH validation and tests pass ✅
   - `remove_task` if EITHER validation or tests fail ❌
 
-#### Decision Point 2: Continue vs Complete
+#### Decision Point 2: Retry vs Complete
 - **Executor**: `check_loop`
 - **Selection Function**: `select_loop_action()`
-- **Logic**: `task_count < max_tasks`
+- **Logic**: `NOT should_keep AND retry_count < max_retries`
 - **Routes to**:
-  - `generate_next` if more tasks needed 🔄
-  - `complete_workflow` if max tasks reached 🏁
+  - `retry_generation` if task failed and retries available 🔄
+  - `complete_workflow` if task succeeded OR max retries reached 🏁
 
 ## Execution Flow
 
@@ -138,8 +139,8 @@ flowchart TD
 10. Check Loop Condition
    ↓
 11. Decision Point 2 🔀
-   ├─→ 🔄 Generate Next (if task_count < max_tasks) → back to step 1
-   └─→ 🏁 Complete Workflow (if task_count >= max_tasks) → END
+   ├─→ 🔄 Retry Generation (if NOT success AND retry_count < max_retries) → back to step 1
+   └─→ 🏁 Complete Workflow (if success OR retry_count >= max_retries) → END
 ```
 
 ## Structured Output Models
@@ -168,59 +169,64 @@ class TestResult(BaseModel):
 class CombinedValidationResult:
     validation: ValidationResult
     test: TestResult
-    task_count: int = 0     # Current task count
-    max_tasks: int = 3      # Maximum tasks to generate
+    retry_count: int = 0    # Current retry attempt
+    max_retries: int = 3    # Maximum retry attempts
     
     @property
     def should_keep(self) -> bool:
         return self.validation.is_valid and self.test.is_valid
     
     @property
-    def should_continue(self) -> bool:
-        return self.task_count < self.max_tasks
+    def should_retry(self) -> bool:
+        return not self.should_keep and self.retry_count < self.max_retries
 ```
 
 ## Loop Implementation
 
-The workflow implements a loop using edges (not external Python loops):
+The workflow implements a retry loop using edges (not external Python loops):
 
 ### Loop Structure
 ```
-keep_task → check_loop → [generate_next OR complete_workflow]
-remove_task → check_loop → [generate_next OR complete_workflow]
-generate_next → generator_agent (loop back to start)
+keep_task → check_loop → complete_workflow (SUCCESS)
+remove_task → check_loop → [retry_generation OR complete_workflow]
+retry_generation → generator_agent (loop back to start)
 ```
 
 ### Shared State Management
-- **task_count**: Tracks number of tasks processed (incremented in `parse_tests_and_decide`)
-- **max_tasks**: Maximum tasks to generate (default: 3)
+- **retry_count**: Tracks number of retry attempts (incremented in `remove_task`)
+- **max_retries**: Maximum retry attempts (default: 3)
+- **target_topic**: The Kubernetes concept to generate (e.g., "ConfigMaps and environment variables")
 - **validation_{task_id}**: Stores validation results for retrieval during testing phase
 
 ### Loop Termination
 The workflow terminates when:
-1. `task_count >= max_tasks`
-2. `check_loop` routes to `complete_workflow`
+1. Task succeeds (validation AND tests pass) → `complete_workflow`
+2. `retry_count >= max_retries` → `complete_workflow`
 3. `complete_workflow` yields output without sending messages
 4. Workflow becomes idle and ends naturally
 
 ## Example Output
 
 ```
-🚀 Starting workflow...
+🚀 Starting workflow for topic: ConfigMaps and environment variables
+   Existing tasks: 15
 [EXECUTOR] parse_generated_task: Extracting task ID...
-✅ Extracted task ID: 001_configmap_env
+✅ Extracted task ID: 082_configmap_env
 [EXECUTOR] parse_validation_result: Parsing validation response...
+❌ FAILED Validation: Missing file: test_05_check.py
+🔀 DECISION: REMOVE task 082_configmap_env
+❌ REMOVING TASK: 082_configmap_env
+   Retry attempts: 1/3
+🔄 CHECK_LOOP: Retry count 1/3
+   → Will retry generation
+🔄 RETRY: Attempt 2/3
+[EXECUTOR] parse_generated_task: Extracting task ID...
+✅ Extracted task ID: 083_configmap_basics
 ✅ PASSED Validation: All required files present
-[EXECUTOR] parse_tests_and_decide: Parsing test results...
-❌ FAILED Tests: Tests failed
-🔀 DECISION: REMOVE task 001_configmap_env
-❌ REMOVING TASK: 001_configmap_env
-   Tasks completed: 1/3
-🔄 CHECK_LOOP: Task count 1/3
-   → Will generate task 2
-🔄 LOOP: Generating task 2/3
-... (repeats for tasks 2 and 3)
-🏁 COMPLETE: Generated 3/3 tasks
+✅ PASSED Tests: All tests passed
+✅ KEEPING TASK: 083_configmap_basics
+   Retry attempts: 1
+🏁 COMPLETE: Task 083_configmap_basics successfully generated after 1 retries
 WORKFLOW COMPLETE
 ```
 
@@ -262,11 +268,11 @@ xdg-open workflow_graph.pdf
 | Test Failures | Logged only | Automatically removes failed tasks |
 | Conditional Logic | None | Routes based on validation + tests |
 | Loop Implementation | External Python loop | Workflow edges with conditional routing |
-| Task Generation | Single task | Multiple tasks (configurable max) |
+| Task Generation | Single task | Single task with retry |
 | State Management | Variables | Shared state + message passing |
 | Extensibility | Limited | Easy to add more agents/steps |
 | Visualization | No | Yes (Mermaid, SVG, PNG, PDF) |
-| Termination | After 1 task | After max_tasks reached |
+| Termination | After 1 task | After success OR max retries |
 
 ## Key Features
 
@@ -282,12 +288,12 @@ xdg-open workflow_graph.pdf
 
 ### 3. Loop Implementation
 - Workflow loops using edges (not external Python loops)
-- Shared state tracks task count
-- Terminates naturally when max tasks reached
+- Shared state tracks retry count and target topic
+- Terminates on success or max retries
 - No infinite loops - guaranteed termination
 
 ### 4. State Management
-- **Shared State**: Stores task_count, max_tasks, and validation results
+- **Shared State**: Stores retry_count, max_retries, target_topic, and validation results
 - **Message Passing**: Data flows through typed workflow messages
 - **Hybrid Approach**: Uses both patterns appropriately
 
@@ -328,20 +334,21 @@ xdg-open workflow_graph.pdf
 
 ## Workflow Characteristics
 
-- **Type**: Sequential with conditional branching and looping
+- **Type**: Sequential with conditional branching and retry loop
 - **Agents**: 3 (Generator, Validator, Pytest)
-- **Executors**: 10 (parsing, request creation, decision, loop control)
-- **Decision Points**: 2 (keep vs remove, continue vs complete)
-- **Branches**: 4 (keep, remove, generate_next, complete)
-- **Loop**: Edge-based with shared state tracking
-- **Max Tasks**: Configurable (default: 3)
+- **Executors**: 10 (parsing, request creation, decision, retry control)
+- **Decision Points**: 2 (keep vs remove, retry vs complete)
+- **Branches**: 4 (keep, remove, retry_generation, complete)
+- **Loop**: Edge-based retry with shared state tracking
+- **Max Retries**: Configurable (default: 3)
+- **Goal**: Generate 1 successful task
 - **State Management**: Hybrid (shared state + message passing)
-- **Error Handling**: Automatic task removal on failure
-- **Termination**: Natural (workflow becomes idle)
+- **Error Handling**: Automatic task removal on failure with retry
+- **Termination**: Natural (success or max retries)
 
 ## Future Enhancements
 
-1. Add retry logic for failed tasks
+1. ~~Add retry logic for failed tasks~~ ✅ Implemented
 2. Store validation/test results in database
 3. Generate reports of passed/failed tasks
 4. Add more validation rules
@@ -349,6 +356,8 @@ xdg-open workflow_graph.pdf
 6. Add parallel task generation
 7. Email notifications for failures
 8. Integration with CI/CD pipelines
+9. Topic suggestion based on existing tasks
+10. Adaptive retry limits based on failure patterns
 
 ## References
 

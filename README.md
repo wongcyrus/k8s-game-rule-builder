@@ -173,15 +173,21 @@ k8s-game-rule-builder/
 ## Documentation
 
 - **README.md** (this file) - Quick start and overview
-- **[WORKFLOW.md](WORKFLOW.md)** - Workflow documentation:
+- **[WORKFLOW.md](WORKFLOW.md)** - Workflow architecture:
+  - Retry-based workflow implementation
   - Conditional workflow architecture
   - Workflow visualization (Mermaid, SVG, PNG, PDF)
   - Structured output models
   - Executor naming conventions
-- **[entities/README.md](entities/README.md)** - DevUI entities:
-  - Quick start guide
-  - Available entities
-  - Usage examples
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history:
+  - Recent changes and improvements
+  - Migration guides
+  - Breaking changes
+- **[docs/RETRY_LOGIC.md](docs/RETRY_LOGIC.md)** - Retry implementation:
+  - How retry logic works
+  - Configuration and best practices
+  - Troubleshooting guide
+  - Example scenarios
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Technical documentation:
   - Agent architecture and workflows
   - Template system and validation patterns

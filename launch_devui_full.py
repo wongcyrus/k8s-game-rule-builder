@@ -1,7 +1,9 @@
-"""Launch DevUI with the FULL workflow including generator agent and loop.
+"""Launch DevUI with the FULL workflow including generator agent and retry loop.
 
 This script creates the workflow programmatically and keeps the MCP context alive
-for the entire DevUI session to support the workflow loop.
+for the entire DevUI session to support the workflow retry loop.
+
+The workflow generates 1 successful task with automatic retry on failure (up to 3 attempts).
 """
 import asyncio
 from agent_framework import AgentExecutor, WorkflowBuilder, MCPStdioTool
@@ -24,7 +26,7 @@ from workflow import (
     keep_task,
     remove_task,
     check_loop,
-    generate_next,
+    retry_generation,  # Changed from generate_next
     complete_workflow,
     select_action,
     select_loop_action,
@@ -66,7 +68,7 @@ async def create_entities():
     pytest_agent = get_pytest_agent()
     pytest_executor = AgentExecutor(pytest_agent, id="pytest_agent")
     
-    # Build workflow with conditional logic and loop
+    # Build workflow with conditional logic and retry loop
     workflow = (
         WorkflowBuilder()
         .set_start_executor(generator_executor)
@@ -82,16 +84,16 @@ async def create_entities():
             [keep_task, remove_task],
             selection_func=select_action,
         )
-        # Add loop edges
+        # Add retry loop edges
         .add_edge(keep_task, check_loop)
         .add_edge(remove_task, check_loop)
         .add_multi_selection_edge_group(
             check_loop,
-            [generate_next, complete_workflow],
+            [retry_generation, complete_workflow],
             selection_func=select_loop_action,
         )
-        # generate_next loops back to generator
-        .add_edge(generate_next, generator_executor)
+        # retry_generation loops back to generator
+        .add_edge(retry_generation, generator_executor)
         .build()
     )
     
@@ -103,13 +105,14 @@ def main():
     """Launch DevUI with full workflow and agents."""
     print("Launching DevUI with FULL workflow and all agents...")
     print("\nEntities:")
-    print("  ✅ K8s Task Workflow (with loop)")
+    print("  ✅ K8s Task Workflow (with retry loop)")
     print("  ✅ Generator Agent (with MCP filesystem)")
     print("  ✅ Validator Agent")
     print("  ✅ Pytest Agent")
     print("\nFeatures:")
-    print("  - Loop functionality (generates 3 tasks)")
-    print("  - Two decision points (keep/remove, continue/complete)")
+    print("  - Retry loop (up to 3 attempts)")
+    print("  - Topic-focused generation")
+    print("  - Two decision points (keep/remove, retry/complete)")
     print("  - Shared state management")
     print("  - MCP tool stays alive for entire session")
     print("\n🌐 Opening browser to http://localhost:8081")

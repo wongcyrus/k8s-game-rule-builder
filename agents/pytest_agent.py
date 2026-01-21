@@ -28,22 +28,34 @@ def run_pytest_command(
     logging.info(f"Running pytest command: {command}")
     logging.info(f"Working directory: {test_project_path}")
     
-    try:
-        cmd_list = command.split()
-        result = subprocess.run(
-            cmd_list,
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=test_project_path,
-        )
-        logging.info(result.stdout)
-        return _result(True, "Pytest succeeded", details=[result.stdout])
-    except subprocess.CalledProcessError as e:
-        # Include both stdout and stderr for debugging
-        combined = (e.stdout or "") + "\n" + (e.stderr or "")
-        logging.error(combined)
-        return _result(False, "Pytest failed", details=[combined])
+    cmd_list = command.split()
+    result = subprocess.run(
+        cmd_list,
+        capture_output=True,
+        text=True,
+        check=False,  # Don't raise exception, check exit code manually
+        cwd=test_project_path,
+    )
+    
+    combined_output = result.stdout + "\n" + result.stderr
+    
+    # Pytest exit codes:
+    # 0 = all tests passed
+    # 1 = tests were collected and run but some failed
+    # 2 = test execution was interrupted
+    # 3 = internal error
+    # 4 = pytest command line usage error
+    # 5 = no tests collected
+    
+    if result.returncode == 0:
+        logging.info(combined_output)
+        return _result(True, "All tests passed", details=[combined_output])
+    elif result.returncode == 5:
+        logging.warning(combined_output)
+        return _result(False, "No tests collected", details=[combined_output])
+    else:
+        logging.error(combined_output)
+        return _result(False, f"Tests failed (exit code {result.returncode})", details=[combined_output])
 
 
 def get_pytest_agent():
