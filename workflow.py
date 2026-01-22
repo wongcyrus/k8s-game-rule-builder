@@ -125,7 +125,10 @@ async def parse_generated_task(response: AgentExecutorResponse, ctx: WorkflowCon
         logging.info(f"✅ Using task ID from shared state: {task_id}")
     except KeyError:
         # Fallback: Extract task ID from response text
-        task_id_match = re.search(rf'tests/{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
+        # Try multiple patterns since MCP server is scoped to tests/ root
+        task_id_match = re.search(rf'{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
+        if not task_id_match:
+            task_id_match = re.search(rf'tests/{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
         if not task_id_match:
             task_id_match = re.search(r'(\d{3}_[a-z0-9_]+)', text)
         
@@ -413,33 +416,81 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
     
     Note: Each retry creates a fresh request. The generator uses AzureOpenAIChatClient
     which manages conversation in-memory, so each iteration is independent.
+    
+    Supports two modes:
+    1. Full workflow mode: Uses complete concept details from shared state
+    2. DevUI/manual mode: Falls back to basic prompt if concept details missing
     """
     logging.info(f"\n🔄 RETRY: Attempt {combined.retry_count + 1}/{combined.max_retries}")
     
-    # Get the target topic from shared state
+    # Try to get all concept details from shared state
     try:
         target_topic = await ctx.get_shared_state("target_topic")
-    except KeyError:
-        target_topic = "a Kubernetes concept"
-    
-    # Get list of existing task IDs to avoid duplication
-    game_dir = PATHS.game_root
-    existing_tasks = []
-    if game_dir.exists():
-        existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
-    
-    generation_prompt = (
-        f"Generate a complete Kubernetes learning task about '{target_topic}' with a unique ID in format '###_concept_name'. "
-        f"This is retry attempt {combined.retry_count + 1} of {combined.max_retries}. "
-        f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
-        f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
-        f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
-        f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
-        f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
-        f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
-        f"Use proper Jinja template variables and follow all established patterns. "
-        f"Make sure all files are syntactically correct and tests will pass."
-    )
+        task_id = await ctx.get_shared_state("task_id")
+        concept_description = await ctx.get_shared_state("concept_description")
+        difficulty = await ctx.get_shared_state("difficulty")
+        objective = await ctx.get_shared_state("objective")
+        
+        # Full workflow mode - all data available
+        logging.info(f"   Mode: Full workflow (with concept details)")
+        logging.info(f"   Task ID: {task_id}")
+        logging.info(f"   Topic: {target_topic}")
+        logging.info(f"   Difficulty: {difficulty}")
+        
+        generation_prompt = (
+            f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
+            f"This is retry attempt {combined.retry_count + 1} of {combined.max_retries}. "
+            f"\n\nIMPORTANT: You MUST use the exact task ID '{task_id}' - do not generate a new ID."
+            f"\n\nIMPORTANT: Create directory {PATHS.game_name}/{task_id}/ (NOT tests/{PATHS.game_name}/...)"
+            f"\n\nTask Details:"
+            f"\n- Concept: {target_topic}"
+            f"\n- Description: {concept_description}"
+            f"\n- Difficulty: {difficulty}"
+            f"\n- Objective: {objective}"
+            f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
+            f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
+            f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+            f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
+            f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
+            f"Use proper Jinja template variables and follow all established patterns. "
+            f"Make sure all files are syntactically correct and tests will pass."
+        )
+        
+    except KeyError as e:
+        # DevUI/manual mode - minimal data available
+        logging.warning(f"   Mode: DevUI/manual (missing concept details: {e})")
+        logging.warning("   Falling back to basic retry prompt")
+        
+        # Try to get at least task_id and topic
+        try:
+            task_id = await ctx.get_shared_state("task_id")
+            target_topic = await ctx.get_shared_state("target_topic")
+            
+            logging.info(f"   Task ID: {task_id}")
+            logging.info(f"   Topic: {target_topic}")
+            
+            generation_prompt = (
+                f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
+                f"This is retry attempt {combined.retry_count + 1} of {combined.max_retries}. "
+                f"\n\nIMPORTANT: You MUST use the exact task ID '{task_id}' - do not generate a new ID."
+                f"\n\nIMPORTANT: Create directory {PATHS.game_name}/{task_id}/ (NOT tests/{PATHS.game_name}/...)"
+                f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
+                f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
+                f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+                f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
+                f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
+                f"Use proper Jinja template variables and follow all established patterns. "
+                f"Make sure all files are syntactically correct and tests will pass."
+            )
+            
+        except KeyError:
+            # Absolute fallback - no task_id or topic
+            logging.error("❌ RETRY FAILED: Missing both task_id and target_topic")
+            logging.error("   Cannot retry without at least task ID and topic.")
+            await ctx.yield_output(
+                f"❌ Retry failed: Missing required information (task_id and target_topic). Workflow cannot continue."
+            )
+            return
     
     await ctx.send_message(
         AgentExecutorRequest(
@@ -482,10 +533,11 @@ async def main():
         load_prompts=False
     )
     
+    # MCP server root should be the parent of tests/ so agent can create tests/game02/XXX/
     tests_mcp_tool = MCPStdioTool(
         name="filesystem_tests",
         command="npx",
-        args=["-y", "@modelcontextprotocol/server-filesystem", str(PATHS.tests_root)],
+        args=["-y", "@modelcontextprotocol/server-filesystem", str(PATHS.tests_root.parent)],
         load_prompts=False
     )
     
@@ -556,24 +608,13 @@ async def main():
         print(viz.to_digraph())
         logging.info("-"*80)
         
-        # Export to files
-        try:
-            svg_file = viz.save_svg("workflow_graph.svg")
-            logging.info(f"\n✅ SVG exported to: {svg_file}")
-        except Exception as e:
-            logging.warning(f"⚠️  Could not export SVG: {e}")
-        
+        # Export to files        
         try:
             png_file = viz.save_png("workflow_graph.png")
             logging.info(f"✅ PNG exported to: {png_file}")
         except Exception as e:
-            logging.warning(f"⚠️  Could not export PNG: {e}")
-        
-        try:
-            pdf_file = viz.save_pdf("workflow_graph.pdf")
-            logging.info(f"✅ PDF exported to: {pdf_file}")
-        except Exception as e:
-            logging.warning(f"⚠️  Could not export PDF: {e}")
+            logging.warning(f"⚠️  Could not export PNG: {e}")       
+       
         
         logging.info("\n" + "="*80)
         
@@ -589,9 +630,21 @@ async def main():
         idea_result = await idea_agent.run(
             "Based on the Kubernetes documentation, suggest ONE new and unique task idea "
             "for teaching Kubernetes concepts. Choose a concept that hasn't been covered yet. "
-            "Provide a clear task ID in format '###_concept_name' (e.g., '050_secrets_management'). "
-            "Include the concept name, description, and objective for what students will learn. "
-            "Call save_k8s_task_concept to save your concept."
+            "\n\nYou MUST generate exactly 3 task variations (BEGINNER, INTERMEDIATE, ADVANCED)."
+            "\n\nFor the BEGINNER variation, use a task_id in format '###_concept_name' (e.g., '050_secrets_management')."
+            "\nFor INTERMEDIATE and ADVANCED, you can use sequential IDs or descriptive suffixes."
+            "\n\nEach variation must include:"
+            "\n- task_id: string (e.g., '050_secrets_management')"
+            "\n- difficulty: string - must be exactly 'BEGINNER', 'INTERMEDIATE', or 'ADVANCED'"
+            "\n- title: string - descriptive title"
+            "\n- objective: string - what students will learn"
+            "\n- key_skills: list of strings - skills students will acquire"
+            "\n- estimated_time: integer - completion time in minutes"
+            "\n\nAlso provide:"
+            "\n- concept: string - core concept name"
+            "\n- description: string - general description of the concept"
+            "\n- tags: list of strings - relevant tags (e.g., ['security', 'storage'])"
+            "\n\nCall save_k8s_task_concept with ALL parameters: concept, tags, description, and variations (list of 3 dicts)."
         )
         
         # Get concept from tool call
@@ -602,15 +655,23 @@ async def main():
             logging.error(f"   Agent response (first 500 chars): {idea_result.text[:500]}")
             return
         
-        # Save to memory
-        idea_memory.add_structured_concept(concept)
-        logging.info(f"✅ Saved concept to memory: {concept.concept}")
+        # Validate variations exist
+        if not concept.variations or len(concept.variations) == 0:
+            logging.error("❌ No task variations found in concept")
+            logging.error(f"   Concept: {concept.concept}")
+            logging.error(f"   Description: {concept.description}")
+            logging.error(f"   Tags: {concept.tags}")
+            logging.error("\n⚠️  The idea agent did not generate task variations properly.")
+            logging.error("   This is an LLM execution issue - the agent should generate 3 variations.")
+            logging.error("   Try running the workflow again, or check the idea agent instructions.")
+            return
+        
+        # Don't save to memory yet - only save if task passes validation/tests
+        logging.info(f"✅ Generated concept: {concept.concept}")
+        logging.info(f"   Will save to memory only if task succeeds")
         
         # Use beginner variation
-        beginner_task = concept.variations[0] if concept.variations else None
-        if not beginner_task:
-            logging.error("❌ No task variations found")
-            return
+        beginner_task = concept.variations[0]
         
         target_topic = concept.concept
         task_id = beginner_task.task_id
@@ -632,6 +693,7 @@ async def main():
             f"\n- Difficulty: {beginner_task.difficulty}"
             f"\n- Objective: {beginner_task.objective}"
             f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
+            f"\n\nIMPORTANT: Create directory {PATHS.game_name}/{task_id}/ (NOT tests/{PATHS.game_name}/...)"
             f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
             f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
             f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
@@ -645,11 +707,36 @@ async def main():
         logging.info(f"   Task ID: {task_id}")
         logging.info(f"   Existing tasks: {len(existing_tasks)}")
         
-        # Store target topic in workflow context for retry attempts
-        async for event in workflow.run_stream(task_prompt, initial_state={"target_topic": target_topic, "task_id": task_id, "retry_count": 0, "max_retries": 3}):
+        # Track if workflow succeeded
+        workflow_succeeded = False
+        
+        # Store all concept details in workflow context for retry attempts
+        # Note: Don't store idea_memory object (not serializable) - we'll handle save differently
+        async for event in workflow.run_stream(
+            task_prompt, 
+            initial_state={
+                "target_topic": target_topic,
+                "task_id": task_id,
+                "concept_description": concept.description,
+                "difficulty": beginner_task.difficulty,
+                "objective": beginner_task.objective,
+                "retry_count": 0,
+                "max_retries": 3
+            }
+        ):
             if isinstance(event, WorkflowEvent):
                 if event.data and isinstance(event.data, str) and event.data.strip():  # Only log non-empty string events
                     logging.info(f"\n📤 Workflow output: {event.data}")
+                    # Check if workflow succeeded
+                    if "successfully generated" in event.data:
+                        workflow_succeeded = True
+        
+        # Save concept to memory only if workflow succeeded
+        if workflow_succeeded:
+            idea_memory.add_structured_concept(concept)
+            logging.info(f"\n💾 Saved concept to memory: {concept.concept}")
+        else:
+            logging.info(f"\n⚠️  Concept not saved to memory (workflow did not succeed)")
         
         logging.info("\n" + "="*80)
         logging.info("WORKFLOW COMPLETE")

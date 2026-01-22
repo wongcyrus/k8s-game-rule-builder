@@ -76,22 +76,10 @@ async def main():
         print("="*80)
         
         try:
-            svg_file = viz.save_svg("workflow_graph.svg")
-            print(f"✅ SVG exported to: {svg_file}")
-        except Exception as e:
-            print(f"❌ Could not export SVG: {e}")
-        
-        try:
             png_file = viz.save_png("workflow_graph.png")
             print(f"✅ PNG exported to: {png_file}")
         except Exception as e:
             print(f"❌ Could not export PNG: {e}")
-        
-        try:
-            pdf_file = viz.save_pdf("workflow_graph.pdf")
-            print(f"✅ PDF exported to: {pdf_file}")
-        except Exception as e:
-            print(f"❌ Could not export PDF: {e}")
         
         print("\n" + "="*80)
         print("VISUALIZATION COMPLETE")

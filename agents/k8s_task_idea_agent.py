@@ -316,10 +316,17 @@ async def create_idea_agent_with_mcp(mcp_tool):
         deployment_name=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
+    
+    # Increase max consecutive errors for tool calls (default is 3)
+    # Idea agent needs to call save_k8s_task_concept with complex data structure
+    logging.info(f"📊 Before setting: max_consecutive_errors_per_request = {chat_client.function_invocation_configuration.max_consecutive_errors_per_request}")
+    chat_client.function_invocation_configuration.max_consecutive_errors_per_request = 10
+    logging.info(f"✅ After setting: max_consecutive_errors_per_request = {chat_client.function_invocation_configuration.max_consecutive_errors_per_request}")
 
     memory = TaskIdeasMemory()
     
     # Use as_agent() with save_k8s_task_concept tool
+    # Note: Don't use context_providers to avoid serialization issues in workflow
     agent = chat_client.as_agent(
         name="K8sTaskIdeaAgent",
         instructions=(
@@ -347,9 +354,11 @@ async def create_idea_agent_with_mcp(mcp_tool):
         ),
         tools=[mcp_tool, save_k8s_task_concept],
         tool_choice="auto",
-        context_providers=[memory],
         middleware=[LoggingFunctionMiddleware()],
     )
+    
+    # Verify the setting persisted after agent creation
+    logging.info(f"🔍 After agent creation: max_consecutive_errors_per_request = {chat_client.function_invocation_configuration.max_consecutive_errors_per_request}")
 
     return agent, memory
 
