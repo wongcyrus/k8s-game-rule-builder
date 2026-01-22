@@ -35,7 +35,6 @@ from azure.identity import AzureCliCredential
 
 from agents import (
     get_pytest_agent,
-    get_k8s_task_validator_agent,
 )
 from agents.k8s_task_generator_agent import create_generator_agent_with_mcp
 from agents.k8s_task_idea_agent import create_idea_agent_with_mcp
@@ -152,164 +151,108 @@ async def parse_generated_task(response: AgentExecutorResponse, ctx: WorkflowCon
     await ctx.send_message(task_info)
 
 
-# Executor: Create validation request
-@executor(id="create_validation_request")
-async def create_validation_request(task_info: TaskInfo, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
-    """Create validation request for the validator agent."""
-    logging.info(f"\n[EXECUTOR] create_validation_request: Creating validation request for {task_info.task_id}...")
+# Executor: Run validation directly (no LLM needed)
+@executor(id="run_validation")
+async def run_validation(task_info: TaskInfo, ctx: WorkflowContext[TaskWithValidation]) -> None:
+    """Run validation directly without LLM - it's just file checks."""
+    logging.info(f"\n[EXECUTOR] run_validation: Validating {task_info.task_id}...")
     
-    validation_prompt = (
-        f"Validate the task directory {task_info.task_id} and return structured JSON with "
-        f"'is_valid' (bool), 'reason' (string), 'task_id' (string), and 'task_directory' (string). "
-        f"Check all required files, YAML syntax, Python syntax, and Jinja templates."
-    )
+    from agents.k8s_task_validator import validate_task_directory
     
-    await ctx.send_message(
-        AgentExecutorRequest(
-            messages=[ChatMessage(Role.USER, text=validation_prompt)],
-            should_respond=True
-        )
-    )
-
-
-# Executor: Parse validation response
-@executor(id="parse_validation_result")
-async def parse_validation_result(response: AgentExecutorResponse, ctx: WorkflowContext[TaskWithValidation]) -> None:
-    """Parse validation response into structured result."""
-    logging.info("\n[EXECUTOR] parse_validation_result: Parsing validation response...")
+    # Run validation directly
+    result = validate_task_directory(task_info.task_id)
     
-    text = response.agent_response.text
-    logging.info(f"Validator response (first 500 chars): {text[:500]}")
+    # Extract detailed failure reasons from results
+    failure_reasons = []
+    if not result["is_valid"] and result.get("details"):
+        for detail in result["details"]:
+            if isinstance(detail, dict) and not detail.get("is_valid", True):
+                reason = detail.get("reason", "Unknown error")
+                # Skip generic messages, only include specific errors
+                if reason not in ["Validation completed", "Directory listing"]:
+                    failure_reasons.append(reason)
     
-    try:
-        # Extract JSON from response
-        json_match = re.search(r'\{[^}]*"is_valid"[^}]*\}', text, re.DOTALL)
-        if json_match:
-            result_data = json.loads(json_match.group(0))
-            validation = ValidationResult(**result_data)
+    # Create a more informative reason
+    if failure_reasons:
+        detailed_reason = "; ".join(failure_reasons[:3])  # Show first 3 errors
+        if len(failure_reasons) > 3:
+            detailed_reason += f" (and {len(failure_reasons) - 3} more errors)"
+    else:
+        # If no specific failures found but validation failed, use generic message
+        if not result["is_valid"]:
+            detailed_reason = "Validation failed - check file structure and syntax"
         else:
-            # Fallback parsing - extract task ID from text
-            task_id_match = re.search(r'(\d{3}_[a-z0-9_]+)', text)
-            task_id = task_id_match.group(1) if task_id_match else "unknown"
-            is_valid = "valid" in text.lower() and "invalid" not in text.lower()
-            
-            validation = ValidationResult(
-                is_valid=is_valid,
-                reason=text[:200],
-                task_id=task_id,
-                task_directory=f"tests/{PATHS.game_name}/{task_id}"
-            )
-        
-        status = "✅ PASSED" if validation.is_valid else "❌ FAILED"
-        logging.info(f"{status} Validation: {validation.reason}")
-        
-        # Store validation result in shared state for later retrieval
-        await ctx.set_shared_state(f"validation_{validation.task_id}", validation)
-        
-        # Create TaskWithValidation
-        task_with_val = TaskWithValidation(
-            task_id=validation.task_id,
-            task_directory=validation.task_directory,
-            validation=validation
-        )
-        
-        await ctx.send_message(task_with_val)
-        
-    except Exception as e:
-        logging.error(f"❌ Failed to parse validation: {e}")
-        raise
-
-
-# Executor: Create pytest request
-@executor(id="create_pytest_request")
-async def create_pytest_request(task_with_val: TaskWithValidation, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
-    """Create pytest request for the pytest agent."""
-    logging.info(f"\n[EXECUTOR] create_pytest_request: Creating pytest request for {task_with_val.task_id}...")
+            detailed_reason = "All validation checks passed"
     
-    pytest_prompt = (
-        f"Run all tests in {task_with_val.task_directory}/ to validate the generated task. "
-        f"Show test results and any failures. Task ID: {task_with_val.task_id}"
+    # Convert to ValidationResult
+    validation = ValidationResult(
+        is_valid=result["is_valid"],
+        reason=detailed_reason,
+        task_id=task_info.task_id,
+        task_directory=task_info.task_directory
     )
     
-    await ctx.send_message(
-        AgentExecutorRequest(
-            messages=[ChatMessage(Role.USER, text=pytest_prompt)],
-            should_respond=True
-        )
+    status = "✅ PASSED" if validation.is_valid else "❌ FAILED"
+    logging.info(f"{status} Validation: {validation.reason}")
+    
+    # Store validation result in shared state for later retrieval
+    await ctx.set_shared_state(f"validation_{validation.task_id}", validation)
+    
+    # Create TaskWithValidation
+    task_with_val = TaskWithValidation(
+        task_id=validation.task_id,
+        task_directory=validation.task_directory,
+        validation=validation
     )
+    
+    await ctx.send_message(task_with_val)
 
 
-# Executor: Parse test results and make decision
-@executor(id="parse_tests_and_decide")
-async def parse_tests_and_decide(response: AgentExecutorResponse, ctx: WorkflowContext[CombinedValidationResult]) -> None:
-    """Parse pytest response and make keep/remove decision."""
-    logging.info("\n[EXECUTOR] parse_tests_and_decide: Parsing test results and making decision...")
+# Executor: Run pytest directly (no LLM needed)
+@executor(id="run_pytest")
+async def run_pytest(task_with_val: TaskWithValidation, ctx: WorkflowContext[TestResult]) -> None:
+    """Run pytest directly without LLM - it's just command execution."""
+    logging.info(f"\n[EXECUTOR] run_pytest: Running tests for {task_with_val.task_id}...")
     
-    text = response.agent_response.text
-    logging.info(f"Pytest response (first 500 chars): {text[:500]}")
+    from agents.pytest_runner import run_pytest_command
     
-    # Extract task ID from response
-    task_id_match = re.search(r'Task ID: (\d{3}_[a-z0-9_]+)', text)
-    if not task_id_match:
-        task_id_match = re.search(rf'tests/{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
-    task_id = task_id_match.group(1) if task_id_match else "unknown"
-    task_directory = f"tests/{PATHS.game_name}/{task_id}"
+    # Build pytest command
+    pytest_command = f"pytest --import-mode=importlib --rootdir=. {task_with_val.task_directory}/"
     
-    # Parse test result - look for pytest success indicators
-    # Check for explicit success messages or passed count
-    is_valid = False
-    reason = "Tests failed"
+    # Run pytest directly
+    result = run_pytest_command(pytest_command)
     
-    # Look for pytest success patterns
-    if "all tests passed" in text.lower():
-        is_valid = True
-        reason = "All tests passed"
-    elif re.search(r'passed.*✅.*\d+', text, re.IGNORECASE):
-        # Look for "Passed: ✅ X" pattern
-        passed_match = re.search(r'passed.*✅.*(\d+)', text, re.IGNORECASE)
-        failed_match = re.search(r'failed.*❌.*(\d+)', text, re.IGNORECASE)
-        if passed_match and failed_match:
-            passed_count = int(passed_match.group(1))
-            failed_count = int(failed_match.group(1))
-            if passed_count > 0 and failed_count == 0:
-                is_valid = True
-                reason = f"All {passed_count} tests passed"
-            else:
-                reason = f"{failed_count} tests failed, {passed_count} passed"
-    elif re.search(r'\d+\s+passed', text, re.IGNORECASE):
-        # Look for "X passed" in pytest output
-        passed_match = re.search(r'(\d+)\s+passed', text, re.IGNORECASE)
-        failed_match = re.search(r'(\d+)\s+failed', text, re.IGNORECASE)
-        if passed_match:
-            passed_count = int(passed_match.group(1))
-            failed_count = int(failed_match.group(1)) if failed_match else 0
-            if passed_count > 0 and failed_count == 0:
-                is_valid = True
-                reason = f"All {passed_count} tests passed"
-            else:
-                reason = f"{failed_count} tests failed, {passed_count} passed"
-    
+    # Convert to TestResult
     test_result = TestResult(
-        is_valid=is_valid,
-        reason=reason,
-        task_id=task_id,
-        task_directory=task_directory
+        is_valid=result["is_valid"],
+        reason=result["reason"],
+        task_id=task_with_val.task_id,
+        task_directory=task_with_val.task_directory
     )
     
     status = "✅ PASSED" if test_result.is_valid else "❌ FAILED"
     logging.info(f"{status} Tests: {test_result.reason}")
     
+    await ctx.send_message(test_result)
+
+
+# Executor: Make decision based on test results
+@executor(id="make_decision")
+async def make_decision(test_result: TestResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
+    """Make keep/remove decision based on validation and test results."""
+    logging.info("\n[EXECUTOR] make_decision: Making decision based on test results...")
+    
     # Retrieve validation result from shared state
     try:
-        validation = await ctx.get_shared_state(f"validation_{task_id}")
+        validation = await ctx.get_shared_state(f"validation_{test_result.task_id}")
     except KeyError:
         # Fallback: assume validation passed if we got to testing phase
-        logging.warning(f"⚠️  Validation result not found for {task_id}, assuming passed")
+        logging.warning(f"⚠️  Validation result not found for {test_result.task_id}, assuming passed")
         validation = ValidationResult(
             is_valid=True,
             reason="Validation passed (assumed)",
-            task_id=task_id,
-            task_directory=f"tests/{PATHS.game_name}/{task_id}"
+            task_id=test_result.task_id,
+            task_directory=test_result.task_directory
         )
     
     # Get retry count
@@ -333,7 +276,9 @@ async def parse_tests_and_decide(response: AgentExecutorResponse, ctx: WorkflowC
     )
     
     decision = "KEEP" if combined.should_keep else "REMOVE"
-    logging.info(f"\n🔀 DECISION: {decision} task {task_id}")
+    logging.info(f"\n🔀 DECISION: {decision} task {test_result.task_id}")
+    logging.info(f"   Validation: {'✅ PASSED' if validation.is_valid else '❌ FAILED'} - {validation.reason}")
+    logging.info(f"   Tests: {'✅ PASSED' if test_result.is_valid else '❌ FAILED'} - {test_result.reason}")
     logging.info(f"   Retry count: {retry_count}/{max_retries}")
     
     await ctx.send_message(combined)
@@ -489,7 +434,9 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
         f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
         f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
         f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
-        f"test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+        f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+        f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
+        f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
         f"Use proper Jinja template variables and follow all established patterns. "
         f"Make sure all files are syntactically correct and tests will pass."
     )
@@ -553,25 +500,17 @@ async def main():
         # Create agent executors
         generator_executor = AgentExecutor(generator_agent, id="generator_agent")
         
-        validator_agent = get_k8s_task_validator_agent()
-        validator_executor = AgentExecutor(validator_agent, id="validator_agent")
-        
-        pytest_agent = get_pytest_agent()
-        pytest_executor = AgentExecutor(pytest_agent, id="pytest_agent")
-        
         # Build workflow with conditional logic and retry loop
+        # Note: Validation and pytest are now direct executors (no LLM needed)
         workflow = (
             WorkflowBuilder()
             .set_start_executor(generator_executor)
             .add_edge(generator_executor, parse_generated_task)
-            .add_edge(parse_generated_task, create_validation_request)
-            .add_edge(create_validation_request, validator_executor)
-            .add_edge(validator_executor, parse_validation_result)
-            .add_edge(parse_validation_result, create_pytest_request)
-            .add_edge(create_pytest_request, pytest_executor)
-            .add_edge(pytest_executor, parse_tests_and_decide)
+            .add_edge(parse_generated_task, run_validation)
+            .add_edge(run_validation, run_pytest)
+            .add_edge(run_pytest, make_decision)
             .add_multi_selection_edge_group(
-                parse_tests_and_decide,
+                make_decision,
                 [keep_task, remove_task],
                 selection_func=select_action,
             )
@@ -695,7 +634,9 @@ async def main():
             f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
             f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
             f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
-            f"test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+            f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+            f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
+            f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
             f"Use proper Jinja template variables and follow all established patterns. "
             f"Make sure all files are syntactically correct and tests will pass."
         )

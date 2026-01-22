@@ -45,8 +45,8 @@ Generate → Validate → Test → Success?
 | `workflow.py` | Main workflow implementation |
 | `launch_devui_full.py` | DevUI launcher |
 | `agents/k8s_task_generator_agent.py` | Task generator |
-| `agents/k8s_task_validator_agent.py` | Task validator |
-| `agents/pytest_agent.py` | Test runner |
+| `agents/k8s_task_validator.py` | Task validator (no LLM) |
+| `agents/pytest_runner.py` | Test runner (no LLM) |
 
 ## Agents
 

@@ -1,33 +1,26 @@
-"""Kubernetes task validator agent.
+"""Kubernetes task validator - pure Python validation without LLM.
 
-Provides tools to validate generated game tasks by checking required files,
+Provides functions to validate generated game tasks by checking required files,
 YAML syntax, Python code parsing, and Jinja template syntax.
 
-NOTE: Uses AzureOpenAIChatClient instead of AzureOpenAIResponsesClient to avoid
-server-side thread persistence issues in workflow loops.
+No LLM needed - just deterministic file validation.
 """
-import asyncio
 import ast
 import json
 import logging
 import sys
 import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 import yaml
 from jinja2 import Environment, TemplateSyntaxError
-from pydantic import Field
-from agent_framework.azure import AzureOpenAIChatClient
-from azure.identity import AzureCliCredential
-from agents.config import VALIDATION, AZURE
+from agents.config import VALIDATION
 
 # Ensure the project root is on sys.path when executed directly
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from agents.logging_middleware import LoggingFunctionMiddleware
 
 logging.basicConfig(level=logging.INFO)
 
@@ -90,10 +83,11 @@ def _list_task_files(task_dir: Path) -> list[str]:
     return sorted([p.name for p in task_dir.iterdir() if p.is_file()])
 
 
-def check_required_files(
-    task_dir: Annotated[str, Field(description=f"Task directory relative to tests/{VALIDATION.base_task_root.name} or absolute.")]
-) -> dict[str, Any]:
-    """Check that the standard task files exist."""
+def check_required_files(task_dir: str) -> dict[str, Any]:
+    """Check that the standard task files exist.
+    
+    Note: test_04_challenge.py is optional and not checked here.
+    """
     resolved_dir = _resolve_path(task_dir)
     missing = [name for name in VALIDATION.required_files if not (resolved_dir / name).exists()]
     if missing:
@@ -101,9 +95,7 @@ def check_required_files(
     return _result(True, f"All required files present in {resolved_dir}")
 
 
-def validate_yaml_file(
-    file_path: Annotated[str, Field(description=f"Path to YAML file (absolute or relative to tests/{VALIDATION.base_task_root.name}).")]
-) -> dict[str, Any]:
+def validate_yaml_file(file_path: str) -> dict[str, Any]:
     """Validate YAML syntax for a single file."""
     path = _resolve_path(file_path)
     if not path.exists():
@@ -115,9 +107,7 @@ def validate_yaml_file(
         return _result(False, f"YAML invalid in {path}: {exc}")
 
 
-def validate_python_file(
-    file_path: Annotated[str, Field(description=f"Path to Python file (absolute or relative to tests/{VALIDATION.base_task_root.name}).")]
-) -> dict[str, Any]:
+def validate_python_file(file_path: str) -> dict[str, Any]:
     """Validate Python syntax using AST parsing."""
     path = _resolve_path(file_path)
     if not path.exists():
@@ -129,9 +119,7 @@ def validate_python_file(
         return _result(False, f"Python syntax error in {path}: {exc}")
 
 
-def validate_template_file(
-    file_path: Annotated[str, Field(description=f"Path to Jinja template file (absolute or relative to tests/{VALIDATION.base_task_root.name}).")]
-) -> dict[str, Any]:
+def validate_template_file(file_path: str) -> dict[str, Any]:
     """Validate Jinja template syntax without rendering."""
     path = _resolve_path(file_path)
     if not path.exists():
@@ -143,10 +131,11 @@ def validate_template_file(
         return _result(False, f"Template syntax error in {path}: {exc}")
 
 
-def validate_task_directory(
-    task_dir: Annotated[str, Field(description="Task directory name (e.g., '081_create_configmap') or full path.")]
-) -> dict[str, Any]:
-    """Validate required files, YAML, Python, templates, and JSON within a task directory."""
+def validate_task_directory(task_dir: str) -> dict[str, Any]:
+    """Validate required files, YAML, Python, templates, and JSON within a task directory.
+    
+    This is the main validation function - call this directly instead of using an LLM agent.
+    """
     resolved_dir = _resolve_path(task_dir)
     if not resolved_dir.exists():
         return _result(False, f"Task directory not found: {resolved_dir}")
@@ -194,54 +183,65 @@ def validate_task_directory(
     return _result(overall_valid, "Validation completed", details=results)
 
 
-def get_k8s_task_validator_agent():
-    """Create and return the Kubernetes task validator agent.
+# Legacy function for backward compatibility
+def get_k8s_task_validator():
+    """Legacy function for backward compatibility.
     
-    Uses AzureOpenAIChatClient for in-memory conversation management,
-    avoiding Azure service-side thread persistence issues in workflow loops.
+    Returns a simple wrapper that calls validate_task_directory directly.
+    No LLM needed - validation is deterministic.
     """
-    chat_client = AzureOpenAIChatClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
-        temperature=0.0,
-        credential=AzureCliCredential(),
-    )
+    class ValidatorWrapper:
+        """Simple wrapper to maintain backward compatibility."""
+        
+        async def run(self, prompt: str) -> Any:
+            """Extract task directory from prompt and validate."""
+            # Extract task directory from prompt
+            import re
+            match = re.search(r'(\d{3}_[a-z0-9_]+)', prompt)
+            if not match:
+                # Try to find any path-like string
+                match = re.search(r'tests/[^/]+/(\d{3}_[a-z0-9_]+)', prompt)
+            
+            if match:
+                task_dir = match.group(1)
+            else:
+                # Fallback: assume the prompt contains the task directory
+                task_dir = prompt.strip()
+            
+            logging.info(f"Validating task directory: {task_dir}")
+            result = validate_task_directory(task_dir)
+            
+            # Return a simple object with text attribute for compatibility
+            class Result:
+                def __init__(self, data):
+                    self.text = json.dumps(data, indent=2)
+                    self.data = data
+            
+            return Result(result)
+    
+    return ValidatorWrapper()
 
-    agent = chat_client.as_agent(
-        name="K8sTaskValidatorAgent",
-        instructions=(
-            f"You validate Kubernetes task directories under tests/{VALIDATION.base_task_root.name} using the provided tools. "
-            "Follow these exact steps and name the tool you call at each step:\n"
-            "1) Call check_required_files to confirm all standard files exist.\n"
-            "2) For YAML files, call validate_yaml_file.\n"
-            "3) For Python test files, call validate_python_file.\n"
-            "4) For YAML templates, also call validate_template_file to check Jinja syntax.\n"
-            "5) To perform the full sweep in one call, use validate_task_directory.\n"
-            "Each tool returns JSON with 'is_valid' (bool), 'reason' (str), and optional 'details'. "
-            "Never invent results—always call the tools to inspect real files."
-        ),
-        tools=[
-            check_required_files,
-            validate_yaml_file,
-            validate_python_file,
-            validate_template_file,
-            validate_task_directory,
-        ],
-        tool_choice="required",
-        middleware=[LoggingFunctionMiddleware()],
-    )
 
-    return agent
+# Alias for backward compatibility
+get_k8s_task_validator_agent = get_k8s_task_validator
 
 
 if __name__ == "__main__":
-    async def main():
-        agent = get_k8s_task_validator_agent()
+    def main():
+        """Test validation directly without LLM."""
         sample_task = "642_workload_identity_federation"
-        result = await agent.run(
-            f"Validate the task directory {sample_task} and report any missing files or syntax errors."
-        )
-        logging.info("\n=== K8s Task Validator Result ===")
-        logging.info(result.text)
+        logging.info(f"\n=== Testing K8s Task Validator (No LLM) ===")
+        logging.info(f"Validating: {sample_task}")
+        
+        result = validate_task_directory(sample_task)
+        
+        logging.info("\n=== Validation Result ===")
+        logging.info(json.dumps(result, indent=2))
+        
+        if result["is_valid"]:
+            logging.info("\n✅ Task validation PASSED")
+        else:
+            logging.info("\n❌ Task validation FAILED")
+            logging.info(f"Reason: {result['reason']}")
 
-    asyncio.run(main())
+    main()

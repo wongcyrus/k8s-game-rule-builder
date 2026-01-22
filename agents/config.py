@@ -31,14 +31,18 @@ class ValidationConfig:
         "setup.template.yaml",
         "answer.template.yaml",
         "test_01_setup.py",
+        "test_02_ready.py",
         "test_03_answer.py",
+        # test_04_challenge.py is optional
         "test_05_check.py",
         "test_06_cleanup.py",
     )
     yaml_files: tuple[str, ...] = ("setup.template.yaml", "answer.template.yaml")
     py_files: tuple[str, ...] = (
         "test_01_setup.py",
+        "test_02_ready.py",
         "test_03_answer.py",
+        "test_04_challenge.py",  # Optional but validate if present
         "test_05_check.py",
         "test_06_cleanup.py",
     )

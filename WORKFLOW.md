@@ -47,26 +47,20 @@ python launch_devui_full.py
 flowchart TD
   generator_agent["generator_agent (Start)"];
   parse_generated_task["parse_generated_task"];
-  create_validation_request["create_validation_request"];
-  validator_agent["validator_agent"];
-  parse_validation_result["parse_validation_result"];
-  create_pytest_request["create_pytest_request"];
-  pytest_agent["pytest_agent"];
-  parse_tests_and_decide["parse_tests_and_decide"];
+  run_validation["run_validation (Direct Executor)"];
+  run_pytest["run_pytest (Direct Executor)"];
+  make_decision["make_decision"];
   keep_task["keep_task"];
   remove_task["remove_task"];
   check_loop["check_loop"];
   retry_generation["retry_generation"];
   complete_workflow["complete_workflow"];
   generator_agent --> parse_generated_task;
-  parse_generated_task --> create_validation_request;
-  create_validation_request --> validator_agent;
-  validator_agent --> parse_validation_result;
-  parse_validation_result --> create_pytest_request;
-  create_pytest_request --> pytest_agent;
-  pytest_agent --> parse_tests_and_decide;
-  parse_tests_and_decide --> keep_task;
-  parse_tests_and_decide --> remove_task;
+  parse_generated_task --> run_validation;
+  run_validation --> run_pytest;
+  run_pytest --> make_decision;
+  make_decision --> keep_task;
+  make_decision --> remove_task;
   keep_task --> check_loop;
   remove_task --> check_loop;
   check_loop --> retry_generation;
@@ -76,24 +70,23 @@ flowchart TD
 
 ## Workflow Components
 
-### Agents (3)
+### Agents (1 + 2 Direct Executors)
 
-1. **generator_agent** - Creates complete K8s task with all required files
-2. **validator_agent** - Validates task structure, YAML syntax, Python syntax, Jinja templates
-3. **pytest_agent** - Runs all tests in the task directory
+1. **generator_agent** - Creates complete K8s task with all required files (uses LLM)
+2. **run_validation** - Direct executor: validates task structure (NO LLM, pure Python)
+3. **run_pytest** - Direct executor: runs pytest tests (NO LLM, subprocess execution)
 
-### Executors (10)
+### Executors (8)
 
 1. **parse_generated_task** - Parses generator response and extracts task ID
-2. **create_validation_request** - Creates validation request for validator agent
-3. **parse_validation_result** - Parses validation response into structured `ValidationResult`, stores in shared state
-4. **create_pytest_request** - Creates pytest request for pytest agent
-5. **parse_tests_and_decide** - Parses test results, retrieves validation from shared state, makes decision
-6. **keep_task** - Success path (validation + tests passed)
-7. **remove_task** - Failure path (deletes task directory, increments retry_count)
-8. **check_loop** - Checks if should retry or complete
-9. **retry_generation** - Creates request for retry generation with topic and existing tasks (loops back)
-10. **complete_workflow** - Terminates workflow on success or max retries
+2. **run_validation** - Direct validation executor (NO LLM - pure Python file checks)
+3. **run_pytest** - Direct pytest executor (NO LLM - subprocess execution)
+4. **make_decision** - Combines validation + test results, makes keep/remove decision
+5. **keep_task** - Success path (validation + tests passed)
+6. **remove_task** - Failure path (deletes task directory, increments retry_count)
+7. **check_loop** - Checks if should retry or complete
+8. **retry_generation** - Creates request for retry generation (loops back)
+9. **complete_workflow** - Terminates workflow on success or max retries
 
 ### Conditional Logic
 
@@ -120,25 +113,19 @@ flowchart TD
    ↓
 2. Parse Generated Task (extract task ID)
    ↓
-3. Create Validation Request
+3. Run Validation (direct executor - NO LLM)
    ↓
-4. Validate Task
+4. Run Tests (direct executor - NO LLM)
    ↓
-5. Parse Validation Result (store in shared state)
+5. Make Decision (combine validation + test results)
    ↓
-6. Create Pytest Request
-   ↓
-7. Run Tests
-   ↓
-8. Parse Tests & Make Decision (retrieve validation from shared state)
-   ↓
-9. Decision Point 1 🔀
+6. Decision Point 1 🔀
    ├─→ ✅ Keep Task (if validation=true AND tests=true)
    └─→ ❌ Remove Task (if validation=false OR tests=false)
    ↓
-10. Check Loop Condition
+7. Check Loop Condition
    ↓
-11. Decision Point 2 🔀
+8. Decision Point 2 🔀
    ├─→ 🔄 Retry Generation (if NOT success AND retry_count < max_retries) → back to step 1
    └─→ 🏁 Complete Workflow (if success OR retry_count >= max_retries) → END
 ```
@@ -335,8 +322,9 @@ xdg-open workflow_graph.pdf
 ## Workflow Characteristics
 
 - **Type**: Sequential with conditional branching and retry loop
-- **Agents**: 3 (Generator, Validator, Pytest)
-- **Executors**: 10 (parsing, request creation, decision, retry control)
+- **Agents**: 1 (Generator only - validator and pytest are direct executors)
+- **Direct Executors**: 2 (run_validation, run_pytest - NO LLM)
+- **Other Executors**: 6 (parsing, decision, retry control)
 - **Decision Points**: 2 (keep vs remove, retry vs complete)
 - **Branches**: 4 (keep, remove, retry_generation, complete)
 - **Loop**: Edge-based retry with shared state tracking
@@ -345,6 +333,7 @@ xdg-open workflow_graph.pdf
 - **State Management**: Hybrid (shared state + message passing)
 - **Error Handling**: Automatic task removal on failure with retry
 - **Termination**: Natural (success or max retries)
+- **LLM Usage**: Only for generation (validation/testing use pure Python)
 
 ## Future Enhancements
 

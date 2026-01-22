@@ -10,6 +10,31 @@ A Python project for building Kubernetes learning game rules using AI agents pow
 - **Automated Test Creation**: Generates complete test suites with setup, validation, and cleanup
 - **Template-Based System**: Uses Jinja2 templates with dynamic variable substitution
 - **Comprehensive Logging**: Built-in middleware for debugging and monitoring
+- **Pure Python Validation**: No LLM for validation/testing - faster, more reliable, cost-effective
+- **Retry Loop**: Automatic retry on failure with configurable max retries
+- **Max Consecutive Errors**: Configurable limit (15) for file generation resilience
+
+## Recent Improvements (2026-01-22)
+
+### 1. Validator & PyTest Refactoring
+- **Removed LLM from validation** - Now uses pure Python file checks
+- **Removed LLM from testing** - Now uses direct subprocess execution
+- **Benefits**: Faster (no API calls), more reliable (no hallucinations), cost-effective (no tokens)
+
+### 2. Max Consecutive Errors Configuration
+- **Increased from 3 to 15** - Generator can retry file creation more times
+- **Better resilience** - Handles transient MCP filesystem issues
+- **Verified with logging** - Setting persists through agent creation
+
+### 3. Improved Error Reporting
+- **Specific validation errors** - Shows actual failures instead of "Validation completed"
+- **Multiple errors shown** - Displays first 3 errors with count of remaining
+- **Better debugging** - Clear messages for troubleshooting
+
+### 4. Test File Requirements
+- **test_02_ready.py** (REQUIRED) - Tests that setup resources are ready with polling loops
+- **test_04_challenge.py** (OPTIONAL) - Pre-validation actions for dynamic behaviors
+- **AI-driven analysis** - Generator analyzes setup.template.yaml to create appropriate tests
 
 ## Setup
 
@@ -92,10 +117,12 @@ The project includes several specialized AI agents that work together:
 
 1. **K8s Task Idea Agent** - Generates unique Kubernetes concepts with progressive difficulty (Beginner/Intermediate/Advanced)
 2. **K8s Task Generator Agent** - Creates complete task scaffolding with templates, tests, and validation
-3. **K8s Task Validator Agent** - Validates task structure, YAML syntax, Python syntax, and Jinja templates
-4. **PyTest Agent** - Runs and validates test suites
+3. **K8s Task Validator** - Pure Python validation (NO LLM) - validates task structure, YAML syntax, Python syntax, and Jinja templates
+4. **PyTest Runner** - Pure Python test execution (NO LLM) - runs and validates test suites
 5. **Filesystem Agent** - Handles file operations via MCP filesystem server
 6. **Kubernetes Agent** - Executes kubectl commands against K8s clusters
+
+**Note**: Validator and PyTest Runner don't use LLM - they're pure Python functions for faster, more reliable, and cost-effective validation and testing.
 
 ### Workflows
 
@@ -123,9 +150,9 @@ k8s-game-rule-builder/
 │   ├── filesystem_agent.py         # MCP filesystem operations
 │   ├── k8s_task_generator_agent.py # Task generation
 │   ├── k8s_task_idea_agent.py      # Idea generation with memory
-│   ├── k8s_task_validator_agent.py # Task validation
+│   ├── k8s_task_validator.py       # Task validation (no LLM)
 │   ├── kubernetes_agent.py         # K8s cluster interaction
-│   ├── pytest_agent.py             # Test execution
+│   ├── pytest_runner.py            # Test execution (no LLM)
 │   └── logging_middleware.py       # Agent logging
 ├── entities/               # DevUI entities (agents & workflows)
 │   ├── .env               # Shared environment variables
