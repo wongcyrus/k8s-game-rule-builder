@@ -233,6 +233,7 @@ async def create_generator_agent_with_mcp(mcp_tool):
         tools=mcp_tool,
         tool_choice="auto",
         middleware=[LoggingFunctionMiddleware()],
+        temperature=0,
     )
     
     return agent
