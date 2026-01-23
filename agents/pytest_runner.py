@@ -27,9 +27,14 @@ def run_pytest_command(command: str) -> dict[str, Any]:
     Returns:
         Dict with 'is_valid' (bool), 'reason' (str), and 'details' (list)
     """
+    import os
+    
     test_project_path = str(PATHS.pytest_rootdir)
     logging.info(f"Running pytest command: {command}")
     logging.info(f"Working directory: {test_project_path}")
+    
+    # Check if SKIP_ANSWER_TESTS is set
+    skip_answer = os.environ.get("SKIP_ANSWER_TESTS") == "True"
     
     # Add -s flag to show print statements if not already present
     if '-s' not in command and '--capture=no' not in command:
@@ -48,13 +53,22 @@ def run_pytest_command(command: str) -> dict[str, Any]:
     
     combined_output = result.stdout + "\n" + result.stderr
     
-    # Save test output directly in the task folder as test_result.txt
+    # Save test output directly in the task folder
+    # Use different filename based on SKIP_ANSWER_TESTS
     # Extract task directory from command
     import re
     task_match = re.search(r'(tests/[^/]+/[^/]+)/', command)
     if task_match:
         task_dir = PATHS.pytest_rootdir / task_match.group(1)
-        test_result_file = task_dir / "test_result.txt"
+        
+        # Choose filename based on whether answer tests are skipped
+        if skip_answer:
+            test_result_file = task_dir / "no_answer_test_result.txt"
+            logging.info(f"📝 Running without answer (SKIP_ANSWER_TESTS=True)")
+        else:
+            test_result_file = task_dir / "test_result.txt"
+            logging.info(f"📝 Running with answer (normal test)")
+        
         try:
             with open(test_result_file, 'w') as f:
                 f.write(combined_output)

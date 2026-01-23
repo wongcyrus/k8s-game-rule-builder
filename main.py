@@ -191,6 +191,7 @@ async def main():
                 f"Create ALL required files in tests/{PATHS.game_name}/{task_info['task_id']}/:\n"
                 f"- __init__.py (empty)\n"
                 f"- instruction.md (user-facing challenge with Jinja variables)\n"
+                f"- concept.md (learning material explaining the concept - NO solution code)\n"
                 f"- session.json (JSON with template variables)\n"
                 f"- setup.template.yaml (at minimum creates namespace)\n"
                 f"- answer.template.yaml (complete solution)\n"

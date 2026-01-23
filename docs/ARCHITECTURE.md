@@ -45,11 +45,14 @@ A Python project for building Kubernetes learning game rules using AI agents pow
 **Generated Files per Task:**
 - `__init__.py` (empty)
 - `instruction.md` (user-facing challenge)
+- `concept.md` (learning material explaining the Kubernetes concept - NO solution code)
 - `session.json` (JSON variables for templating)
 - `setup.template.yaml` (creates namespace + prereqs)
 - `answer.template.yaml` (full solution)
 - `test_01_setup.py` (deploy_setup)
+- `test_02_ready.py` (wait for setup resources)
 - `test_03_answer.py` (deploy_answer)
+- `test_04_challenge.py` (optional - triggers/load if needed)
 - `test_05_check.py` (validation with kubectl + JSON parsing)
 - `test_06_cleanup.py` (delete_namespace)
 

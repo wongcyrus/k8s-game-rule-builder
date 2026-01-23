@@ -105,7 +105,7 @@ async def run_workflow():
             f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
             f"\n\nPREVIOUSLY COVERED CONCEPTS (this is a new concept): {', '.join(existing_concepts) if existing_concepts else 'None'}"
             f"\n\n✅ Create directory: {PATHS.game_name}/{task_id}/"
-            f"\n\nCreate ALL required files including __init__.py, instruction.md, session.json, "
+            f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
             f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
             f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
             f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "

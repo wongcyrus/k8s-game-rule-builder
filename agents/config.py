@@ -38,6 +38,7 @@ class ValidationConfig:
     required_files: tuple[str, ...] = (
         "__init__.py",
         "instruction.md",
+        "concept.md",
         "session.json",
         "setup.template.yaml",
         "answer.template.yaml",
