@@ -9,17 +9,23 @@ class Paths:
     game_name: str = "game02"  # Configurable game name
     pytest_rootdir: Path = Path("/home/developer/Documents/data-disk/k8s-game-rule")
     k8s_docs_root: Path = Path("/home/developer/Documents/data-disk/website/content/en/docs/concepts")
+    unsuccessful_root: Path = Path("/home/developer/Documents/data-disk/k8s-game-rule/unsuccessful")
     
     @property
     def game_root(self) -> Path:
         """Dynamic game root based on game_name."""
         return self.tests_root / self.game_name
+    
+    @property
+    def unsuccessful_game_root(self) -> Path:
+        """Unsuccessful tasks directory for the current game."""
+        return self.unsuccessful_root / self.game_name
 
 
 @dataclass(frozen=True)
 class AzureOpenAI:
     endpoint: str = "https://cyrus-me23xi26-eastus2.openai.azure.com/"
-    deployment_name: str = "gpt-5.2-chat"
+    deployment_name: str = "gpt-5.1-chat"
 
 @dataclass(frozen=True)
 class ValidationConfig:

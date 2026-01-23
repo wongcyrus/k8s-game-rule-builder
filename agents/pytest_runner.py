@@ -42,6 +42,20 @@ def run_pytest_command(command: str) -> dict[str, Any]:
     
     combined_output = result.stdout + "\n" + result.stderr
     
+    # Save test output directly in the task folder as test_result.txt
+    # Extract task directory from command
+    import re
+    task_match = re.search(r'(tests/[^/]+/[^/]+)/', command)
+    if task_match:
+        task_dir = PATHS.pytest_rootdir / task_match.group(1)
+        test_result_file = task_dir / "test_result.txt"
+        try:
+            with open(test_result_file, 'w') as f:
+                f.write(combined_output)
+            logging.info(f"💾 Saved test output to: {test_result_file}")
+        except Exception as e:
+            logging.warning(f"Failed to save test output: {e}")
+    
     # Pytest exit codes:
     # 0 = all tests passed
     # 1 = tests were collected and run but some failed
