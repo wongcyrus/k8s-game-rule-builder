@@ -16,10 +16,12 @@ Generate → Validate → Test → Fail → Delete → Generate Again (from scra
 ### New Workflow (Fix)
 ```
 Generate → Validate → Test → Fail → Fix (in place) → Validate → Test
-                                      ↑                              ↓
-                                      └──────── Retry Loop ──────────┘
-                                                     ↓
-                                      Max retries → Move to Unsuccessful
+                        ↓                                          ↑
+                       Pass → Skip Answer Test → Pass → Complete  │
+                                      ↓                            │
+                                     Fail → Retry Loop ────────────┘
+                                              ↓
+                                   Max retries → Move to Unsuccessful
 ```
 
 ## Detailed Flow
@@ -33,14 +35,17 @@ graph TD
     E --> F{Success?}
     F -->|Yes| G[Keep Task]
     F -->|No| H[Record Failure]
-    G --> I[Check Loop]
-    H --> I
-    I --> J{Retry < Max?}
-    J -->|Yes| K[Fix Task Executor]
-    J -->|No| L[Move to Unsuccessful]
-    K --> M[Fixer Agent]
-    M --> C
-    L --> N[Complete Workflow]
+    G --> SA[Skip Answer Test]
+    SA --> SAF{Test 05 Failed?}
+    SAF -->|Yes| I[Complete Workflow]
+    SAF -->|No| J[Check Loop]
+    H --> J
+    J --> K{Retry < Max?}
+    K -->|Yes| L[Fix Task Executor]
+    K -->|No| M[Move to Unsuccessful]
+    L --> N[Fixer Agent]
+    N --> C
+    M --> O[Complete Workflow]
 ```
 
 ## Agent Responsibilities
@@ -127,7 +132,7 @@ graph TD
 ### 7a. keep_task
 - Task passed all checks
 - Keeps task in game folder
-- Routes to check_loop
+- Routes to run_pytest_skip_answer
 
 ### 7b. remove_task (renamed to record_failure)
 - Task failed checks
@@ -136,22 +141,29 @@ graph TD
 - Task stays in game folder for retry attempts
 - Routes to check_loop
 
-### 8. check_loop
+### 8. run_pytest_skip_answer
+- Runs pytest with SKIP_ANSWER_TESTS=True environment variable
+- Validates that test_03_answer.py is skipped
+- Validates that test_05_check.py fails (expected behavior)
+- If validation passes: routes to complete_workflow
+- If validation fails: increments retry count and routes to check_loop
+
+### 9. check_loop
 - Checks if retry_count < max_retries
 - Routes to fix_task or complete_workflow
 
-### 9a. fix_task
+### 10a. fix_task
 - Constructs detailed fix prompt
 - Includes failure reasons
 - Includes raw test output
 - Routes to fixer_agent
 
-### 9b. complete_workflow
+### 10b. complete_workflow
 - Max retries reached: moves task to unsuccessful folder with FAILURE_REPORT.txt
 - Task succeeded: keeps task in game folder
 - Ends workflow
 
-### 10. fixer_agent (AgentExecutor)
+### 11. fixer_agent (AgentExecutor)
 - Runs fixer agent
 - Reads failed task files
 - Makes targeted fixes
@@ -240,6 +252,7 @@ A task is considered successful when:
 3. ✅ Python files have valid syntax
 4. ✅ Jinja templates are valid
 5. ✅ All pytest tests pass
+6. ✅ Skip answer test passes (test_05_check.py fails when SKIP_ANSWER_TESTS=True)
 
 ## Failure Handling
 
@@ -254,6 +267,7 @@ A task is considered successful when:
 | Test assertion error | Fix test logic or expected values |
 | Test timeout error | Add proper polling or increase timeout |
 | Missing test_02_ready.py | Analyze setup.template.yaml and create appropriate readiness checks |
+| Skip answer test failure | Fix test_05_check.py to properly validate answer resources (should fail when answer not deployed) |
 
 ## Benefits of Fix Approach
 

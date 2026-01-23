@@ -481,6 +481,79 @@ async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[Agen
     )
 
 
+@executor(id="run_pytest_skip_answer")
+async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
+    """Run pytest with SKIP_ANSWER_TESTS=True to validate test_05_check.py fails."""
+    logging.info(f"\n[STEP] Running pytest with SKIP_ANSWER_TESTS=True for: {combined.test.task_id}")
+    
+    from agents.pytest_runner import run_pytest_command
+    import os
+    
+    # Set environment variable
+    original_env = os.environ.get("SKIP_ANSWER_TESTS")
+    os.environ["SKIP_ANSWER_TESTS"] = "True"
+    
+    try:
+        pytest_command = f"pytest --import-mode=importlib --rootdir=. {combined.test.task_directory}/"
+        result = run_pytest_command(pytest_command)
+        
+        # Parse the output to check if test_05_check.py failed
+        raw_output = result.get("details", [""])[0] if result.get("details") else ""
+        
+        # Check if test_05_check.py failed (which is expected)
+        test_05_failed = "test_05_check.py" in raw_output and ("FAILED" in raw_output or "failed" in raw_output.lower())
+        
+        # Check if test_03_answer.py was skipped (which is expected)
+        test_03_skipped = "test_03_answer.py" in raw_output and ("SKIPPED" in raw_output or "skipped" in raw_output.lower())
+        
+        logging.info(f"test_03_answer.py skipped: {test_03_skipped}")
+        logging.info(f"test_05_check.py failed: {test_05_failed}")
+        
+        # Validation passes if test_05_check.py failed (as expected when answer is not deployed)
+        if test_05_failed:
+            logging.info("✅ Validation passed: test_05_check.py failed as expected when answer is skipped")
+            await ctx.send_message(combined)
+        else:
+            logging.error("❌ Validation failed: test_05_check.py should fail when SKIP_ANSWER_TESTS=True")
+            
+            # Create new test result with failure
+            new_test_result = TestResult(
+                is_valid=False,
+                reason="test_05_check.py did not fail when answer was skipped (SKIP_ANSWER_TESTS=True)",
+                task_id=combined.test.task_id,
+                task_directory=combined.test.task_directory,
+                raw_output=raw_output
+            )
+            
+            # Increment retry count
+            retry_count = combined.retry_count + 1
+            await ctx.set_shared_state("retry_count", retry_count)
+            
+            # Store failure info
+            failure_reasons = [f"Skip answer test validation failed: {new_test_result.reason}"]
+            await ctx.set_shared_state(f"failure_reasons_{combined.test.task_id}", failure_reasons)
+            
+            updated_combined = CombinedValidationResult(
+                validation=combined.validation,
+                test=new_test_result,
+                retry_count=retry_count,
+                max_retries=combined.max_retries,
+                target_topic=combined.target_topic,
+                concept_description=combined.concept_description,
+                difficulty=combined.difficulty,
+                objective=combined.objective,
+            )
+            
+            await ctx.send_message(updated_combined)
+    
+    finally:
+        # Restore original environment variable
+        if original_env is None:
+            os.environ.pop("SKIP_ANSWER_TESTS", None)
+        else:
+            os.environ["SKIP_ANSWER_TESTS"] = original_env
+
+
 @executor(id="complete_workflow")
 async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowContext[Never, str]) -> None:
     """Complete the workflow - either success or max retries reached."""

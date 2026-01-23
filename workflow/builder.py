@@ -20,9 +20,10 @@ from workflow.executors import (
     check_loop,
     retry_generation,
     fix_task,
+    run_pytest_skip_answer,
     complete_workflow,
 )
-from workflow.selectors import select_action, select_loop_action
+from workflow.selectors import select_action, select_loop_action, select_skip_answer_action
 
 
 async def build_workflow(tests_mcp_tool: MCPStdioTool):
@@ -55,8 +56,13 @@ async def build_workflow(tests_mcp_tool: MCPStdioTool):
             [keep_task, remove_task],
             selection_func=select_action,
         )
-        .add_edge(keep_task, check_loop)
+        .add_edge(keep_task, run_pytest_skip_answer)
         .add_edge(remove_task, check_loop)
+        .add_multi_selection_edge_group(
+            run_pytest_skip_answer,
+            [check_loop, complete_workflow],
+            selection_func=select_skip_answer_action,
+        )
         .add_multi_selection_edge_group(
             check_loop,
             [fix_task, complete_workflow],
