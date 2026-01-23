@@ -20,6 +20,11 @@ class Paths:
     def unsuccessful_game_root(self) -> Path:
         """Unsuccessful tasks directory for the current game."""
         return self.unsuccessful_root / self.game_name
+    
+    @property
+    def unsuccessful_game_name(self) -> str:
+        """Unsuccessful game folder name for filesystem operations."""
+        return f"unsuccessful/{self.game_name}"
 
 
 @dataclass(frozen=True)

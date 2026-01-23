@@ -149,10 +149,6 @@ async def run_validation(task_info: TaskInfo, ctx: WorkflowContext[TaskWithValid
 @executor(id="run_pytest")
 async def run_pytest(task_with_val: TaskWithValidation, ctx: WorkflowContext[TestResult]) -> None:
     """Run pytest directly without LLM - it's just command execution."""
-    logging.info(f"\n[STEP] Running tests for: {task_with_val.task_id}")
-    logging.info("="*80)
-    logging.info("🔍 NEW CODE VERSION - CHECKING RAW OUTPUT CAPTURE")
-    logging.info("="*80)
     
     from agents.pytest_runner import run_pytest_command
     
@@ -274,54 +270,23 @@ async def keep_task(combined: CombinedValidationResult, ctx: WorkflowContext[Com
 
 @executor(id="remove_task")
 async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
-    """Move the task to unsuccessful folder - it failed validation or tests."""
-    logging.info(f"\n[STEP] ❌ Moving task to unsuccessful folder: {combined.test.task_id}")
+    """Record task failure - task stays in game folder for retry attempts."""
+    logging.info(f"\n[STEP] ❌ Task failed: {combined.test.task_id}")
     reasons = []
     if not combined.validation.is_valid:
         reasons.append(f"Validation failed: {combined.validation.reason}")
     if not combined.test.is_valid:
         reasons.append(f"Tests failed: {combined.test.reason}")
     
-    unsuccessful_dir = PATHS.unsuccessful_game_root
-    unsuccessful_dir.mkdir(parents=True, exist_ok=True)
-    
-    task_path = PATHS.game_root / combined.test.task_id
-    unsuccessful_task_path = unsuccessful_dir / combined.test.task_id
-    
-    if task_path.exists():
-        if unsuccessful_task_path.exists():
-            import time
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            unsuccessful_task_path = unsuccessful_dir / f"{combined.test.task_id}_{timestamp}"
-        
-        shutil.move(str(task_path), str(unsuccessful_task_path))
-        logging.info(f"Moved task to: {unsuccessful_task_path}")
-        
-        failure_report_path = unsuccessful_task_path / "FAILURE_REPORT.txt"
-        
-        with open(failure_report_path, 'w') as f:
-            f.write(f"Task ID: {combined.test.task_id}\n")
-            f.write(f"Retry Attempt: {combined.retry_count}\n")
-            f.write(f"Failure Reasons:\n")
-            for reason in reasons:
-                f.write(f"  - {reason}\n")
-            f.write(f"\nValidation Details:\n")
-            f.write(f"  Valid: {combined.validation.is_valid}\n")
-            f.write(f"  Reason: {combined.validation.reason}\n")
-            f.write(f"\nTest Details:\n")
-            f.write(f"  Valid: {combined.test.is_valid}\n")
-            f.write(f"  Reason: {combined.test.reason}\n")
-            f.write(f"\n{'='*80}\n")
-            f.write(f"Full test output saved in: test_result.txt\n")
-            f.write(f"{'='*80}\n")
-        
-        logging.info(f"Saved failure report to: {failure_report_path}")
-    
+    # Increment retry count
     retry_count = combined.retry_count + 1
     await ctx.set_shared_state("retry_count", retry_count)
     
+    # Store failure info in shared state for potential final move
+    await ctx.set_shared_state(f"failure_reasons_{combined.test.task_id}", reasons)
+    
     await ctx.yield_output(
-        f"❌ Task {combined.test.task_id} failed checks and has been moved to unsuccessful folder. Reasons: {'; '.join(reasons)}"
+        f"❌ Task {combined.test.task_id} failed checks (attempt {combined.retry_count + 1}/{combined.max_retries}). Reasons: {'; '.join(reasons)}"
     )
     
     updated_combined = CombinedValidationResult(
@@ -404,6 +369,118 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
     )
 
 
+@executor(id="fix_task")
+async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
+    """Fix the failed task instead of regenerating from scratch."""
+    logging.info(f"\n[STEP] 🔧 Fixing failed task: {combined.test.task_id} (attempt {combined.retry_count + 1}/{combined.max_retries})")
+    
+    task_id = combined.test.task_id
+    target_topic = combined.target_topic
+    concept_description = combined.concept_description
+    difficulty = combined.difficulty
+    objective = combined.objective
+    
+    if not target_topic or not concept_description:
+        raise ValueError(
+            f"Missing task metadata in CombinedValidationResult. "
+            f"target_topic='{target_topic}', concept_description='{concept_description}'. "
+            f"This indicates the metadata was not properly passed through the workflow."
+        )
+    
+    await ctx.set_shared_state("task_id", task_id)
+    await ctx.set_shared_state("target_topic", target_topic)
+    await ctx.set_shared_state("concept_description", concept_description)
+    await ctx.set_shared_state("difficulty", difficulty)
+    await ctx.set_shared_state("objective", objective)
+    
+    failure_reasons = []
+    if not combined.validation.is_valid:
+        failure_reasons.append(f"Validation: {combined.validation.reason}")
+    if not combined.test.is_valid:
+        failure_reasons.append(f"Tests: {combined.test.reason}")
+    
+    # Get raw test output if available
+    raw_test_output = ""
+    try:
+        raw_test_output = await ctx.get_shared_state(f"raw_output_{task_id}")
+        logging.info(f"✅ Retrieved raw test output: {len(raw_test_output)} chars")
+    except KeyError:
+        logging.warning(f"⚠️  No raw test output found for {task_id}")
+        if combined.test.raw_output:
+            raw_test_output = combined.test.raw_output
+            logging.info(f"✅ Using raw_output from TestResult: {len(raw_test_output)} chars")
+    
+    fix_prompt = (
+        f"Fix the failed Kubernetes task '{task_id}' located in '{PATHS.game_name}/{task_id}/'."
+        f"\n\nThis is fix attempt {combined.retry_count + 1} of {combined.max_retries}."
+        f"\n\n⚠️  TASK FAILED WITH THESE ERRORS:"
+        f"\n{chr(10).join([f'  - {reason}' for reason in failure_reasons])}"
+    )
+    
+    if raw_test_output:
+        fix_prompt += (
+            f"\n\n📋 FULL TEST OUTPUT:"
+            f"\n```\n{raw_test_output}\n```"
+        )
+    
+    fix_prompt += (
+        f"\n\n🔍 YOUR TASK:"
+        f"\n1. READ all files from '{PATHS.game_name}/{task_id}/'"
+        f"\n2. READ session.json to see available variables"
+        f"\n3. READ setup.template.yaml to see what resources are deployed"
+        f"\n4. READ answer.template.yaml to understand the solution"
+        f"\n5. ANALYZE the specific errors and identify the root cause"
+        f"\n6. Make TARGETED FIXES to the broken files"
+        f"\n7. WRITE the fixed files back to '{PATHS.game_name}/{task_id}/'"
+        f"\n\n⚠️  CRITICAL FILE WRITING REQUIREMENTS:"
+        f"\n- Task stays in '{PATHS.game_name}/{task_id}/' during retry attempts"
+        f"\n- Read files from '{PATHS.game_name}/{task_id}/'"
+        f"\n- Write fixed files back to '{PATHS.game_name}/{task_id}/'"
+        f"\n- Only write files that need changes (preserve working files)"
+        f"\n- Ensure ALL required files exist (10-11 files total):"
+        f"\n  1. __init__.py (empty file)"
+        f"\n  2. instruction.md (challenge description)"
+        f"\n  3. session.json (plain JSON with variables)"
+        f"\n  4. setup.template.yaml (Jinja template)"
+        f"\n  5. answer.template.yaml (Jinja template)"
+        f"\n  6. test_01_setup.py (deploy setup)"
+        f"\n  7. test_02_ready.py (wait for resources)"
+        f"\n  8. test_03_answer.py (deploy answer)"
+        f"\n  9. test_05_check.py (validate solution)"
+        f"\n  10. test_06_cleanup.py (cleanup)"
+        f"\n  11. test_04_challenge.py (optional - only if needed)"
+        f"\n- If a file is missing → create it"
+        f"\n- If a file is broken → fix it"
+        f"\n- If a file is working → leave it unchanged"
+        f"\n- The workflow will validate and test from '{PATHS.game_name}/{task_id}/'"
+        f"\n\n📝 Task Context:"
+        f"\n- Task ID: {task_id}"
+        f"\n- Concept: {target_topic}"
+        f"\n- Description: {concept_description}"
+        f"\n- Difficulty: {difficulty}"
+        f"\n- Objective: {objective}"
+        f"\n\n✅ QUALITY CHECKLIST:"
+        f"\n- Fix ONLY the broken parts, preserve working code"
+        f"\n- session.json must be plain JSON (NOT Jinja template)"
+        f"\n- YAML templates must use proper Jinja2 syntax: {{{{ variable }}}}"
+        f"\n- test_02_ready.py must check resources from setup.template.yaml (NOT answer.template.yaml!)"
+        f"\n  → DEBUGGING: Read session.json + setup.template.yaml to find correct variable names"
+        f"\n  → DON'T just increase timeout - fix the root cause (wrong resource, wrong variable, wrong file)"
+        f"\n  → Test flow: test_01_setup.py deploys setup → test_02_ready.py waits for setup resources"
+        f"\n  → Then: test_03_answer.py deploys answer → test_05_check.py validates answer resources"
+        f"\n- All tests must use try/except and .get() for safe JSON access"
+        f"\n- Ensure proper Python indentation and syntax"
+        f"\n- Ensure proper YAML indentation (2 spaces)"
+    )
+    
+    await ctx.send_message(
+        AgentExecutorRequest(
+            messages=[ChatMessage(Role.USER, text=fix_prompt)],
+            should_respond=True
+        )
+    )
+
+
 @executor(id="complete_workflow")
 async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowContext[Never, str]) -> None:
     """Complete the workflow - either success or max retries reached."""
@@ -411,4 +488,91 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
     if combined.should_keep:
         await ctx.yield_output(f"🏁 Workflow complete: Task {combined.test.task_id} successfully generated")
     else:
-        await ctx.yield_output(f"🏁 Workflow complete: Failed to generate valid task after {combined.retry_count} retries")
+        # Move task to unsuccessful folder only after all retries exhausted
+        logging.info(f"\n[STEP] ❌ Moving task to unsuccessful folder after {combined.retry_count} failed attempts: {combined.test.task_id}")
+        
+        unsuccessful_dir = PATHS.unsuccessful_game_root
+        unsuccessful_dir.mkdir(parents=True, exist_ok=True)
+        
+        task_path = PATHS.game_root / combined.test.task_id
+        unsuccessful_task_path = unsuccessful_dir / combined.test.task_id
+        
+        if task_path.exists():
+            if unsuccessful_task_path.exists():
+                import time
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                unsuccessful_task_path = unsuccessful_dir / f"{combined.test.task_id}_{timestamp}"
+            
+            shutil.move(str(task_path), str(unsuccessful_task_path))
+            logging.info(f"Moved task to: {unsuccessful_task_path}")
+            
+            # Get failure reasons from shared state
+            try:
+                reasons = await ctx.get_shared_state(f"failure_reasons_{combined.test.task_id}")
+            except KeyError:
+                reasons = []
+                if not combined.validation.is_valid:
+                    reasons.append(f"Validation failed: {combined.validation.reason}")
+                if not combined.test.is_valid:
+                    reasons.append(f"Tests failed: {combined.test.reason}")
+            
+            failure_report_path = unsuccessful_task_path / "FAILURE_REPORT.txt"
+            
+            # Get raw test output if available
+            raw_test_output = ""
+            try:
+                raw_test_output = await ctx.get_shared_state(f"raw_output_{combined.test.task_id}")
+                logging.info(f"✅ Retrieved raw test output for failure report: {len(raw_test_output)} chars")
+            except KeyError:
+                logging.warning(f"⚠️  No raw test output found for {combined.test.task_id}")
+                if combined.test.raw_output:
+                    raw_test_output = combined.test.raw_output
+                    logging.info(f"✅ Using raw_output from TestResult: {len(raw_test_output)} chars")
+            
+            # Read session.json if it exists
+            session_json_content = ""
+            session_json_path = unsuccessful_task_path / "session.json"
+            if session_json_path.exists():
+                try:
+                    with open(session_json_path, 'r') as sf:
+                        session_json_content = sf.read()
+                    logging.info(f"✅ Read session.json: {len(session_json_content)} chars")
+                except Exception as e:
+                    logging.warning(f"⚠️  Could not read session.json: {e}")
+            
+            with open(failure_report_path, 'w') as f:
+                f.write(f"Task ID: {combined.test.task_id}\n")
+                f.write(f"Total Retry Attempts: {combined.retry_count}\n")
+                f.write(f"Final Failure Reasons:\n")
+                for reason in reasons:
+                    f.write(f"  - {reason}\n")
+                f.write(f"\nValidation Details:\n")
+                f.write(f"  Valid: {combined.validation.is_valid}\n")
+                f.write(f"  Reason: {combined.validation.reason}\n")
+                f.write(f"\nTest Details:\n")
+                f.write(f"  Valid: {combined.test.is_valid}\n")
+                f.write(f"  Reason: {combined.test.reason}\n")
+                
+                # Add session.json content
+                if session_json_content:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"SESSION.JSON CONTENT:\n")
+                    f.write(f"{'='*80}\n")
+                    f.write(session_json_content)
+                    f.write(f"\n{'='*80}\n")
+                
+                # Add raw test output
+                if raw_test_output:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"FULL TEST OUTPUT:\n")
+                    f.write(f"{'='*80}\n")
+                    f.write(raw_test_output)
+                    f.write(f"\n{'='*80}\n")
+                else:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"Full test output saved in: test_result.txt\n")
+                    f.write(f"{'='*80}\n")
+            
+            logging.info(f"Saved failure report to: {failure_report_path}")
+        
+        await ctx.yield_output(f"🏁 Workflow complete: Failed to generate valid task after {combined.retry_count} retries. Task moved to unsuccessful folder.")

@@ -62,7 +62,7 @@ async def run_workflow():
         idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
         
         # Build workflow
-        workflow, generator_executor = await build_workflow(tests_mcp_tool)
+        workflow, generator_executor, fixer_executor = await build_workflow(tests_mcp_tool)
         
         # Generate workflow visualization
         viz = WorkflowViz(workflow)

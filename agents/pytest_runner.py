@@ -31,6 +31,12 @@ def run_pytest_command(command: str) -> dict[str, Any]:
     logging.info(f"Running pytest command: {command}")
     logging.info(f"Working directory: {test_project_path}")
     
+    # Add -s flag to show print statements if not already present
+    if '-s' not in command and '--capture=no' not in command:
+        # Insert -s after pytest command
+        command = command.replace('pytest ', 'pytest -s ', 1)
+        logging.info(f"Added -s flag to show print statements: {command}")
+    
     cmd_list = command.split()
     result = subprocess.run(
         cmd_list,
