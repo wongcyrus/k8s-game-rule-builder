@@ -42,3 +42,4 @@ wheels/
 Thumbs.db
 task_ideas_memory.json
 task_ideas_thread.json
+task_ideas_failure_memory.json

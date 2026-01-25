@@ -9,6 +9,7 @@ pytest-html
 names_generator
 Jinja2
 requests-toolbelt
+pytest-timeout
 
 # Agent Framework
 # This will install all sub-packages, see `python/packages` for individual packages.

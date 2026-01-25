@@ -25,6 +25,45 @@ logging.basicConfig(
 )
 
 
+def reset_minikube(iteration):
+    # Clean up minikube before each iteration
+    import subprocess
+    try:
+        logging.info(f"[ITERATION {iteration + 1}] Cleaning up minikube...")
+        result = subprocess.run(
+            ["minikube", "delete", "--purge"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+        if result.returncode == 0:
+            logging.info("Minikube cleanup completed successfully")
+        else:
+            logging.warning(f"Minikube cleanup returned non-zero exit code: {result.returncode}")
+            logging.warning(f"stderr: {result.stderr}")
+    
+        # Start minikube after delete
+        logging.info(f"[ITERATION {iteration + 1}] Starting minikube...")
+        start_result = subprocess.run(
+            ["minikube", "start"],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        if start_result.returncode == 0:
+            logging.info("Minikube started successfully")
+        else:
+            logging.warning(f"Minikube start returned non-zero exit code: {start_result.returncode}")
+            logging.warning(f"stderr: {start_result.stderr}")
+    
+    except subprocess.TimeoutExpired:
+        logging.error("Minikube operation timed out")
+    except FileNotFoundError:
+        logging.warning("minikube command not found - skipping cleanup and start")
+    except Exception as e:
+        logging.error(f"Error during minikube operation: {e}")
+
+
 async def run_workflow():
     """Run the complete K8s task generation workflow."""
     # Force reload to pick up code changes
@@ -73,71 +112,85 @@ async def run_workflow():
             viz.save_png("workflow_graph.png")
         except Exception:
             pass
+        # Loop X times to generate multiple tasks
+        num_iterations = 80  # You can adjust this number
         
-        # Step 1: Generate unique task idea
-        concept = await generate_task_idea(idea_agent, idea_memory)
-        
-        beginner_task = concept.variations[0]
-        target_topic = concept.concept
-        task_id = beginner_task.task_id
-        
-        # Step 2: Run workflow
-        logging.info("\n[STEP 2] Running workflow to generate task files...")
-        
-        # Get existing tasks
-        game_dir = PATHS.game_root
-        existing_tasks = []
-        if game_dir.exists():
-            existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
-        
-        # Get existing concepts
-        existing_concepts = []
-        if idea_memory.generated_ideas:
-            existing_concepts = [idea['concept'] for idea in idea_memory.generated_ideas.values()]
-        
-        task_prompt = (
-            f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
-            f"\n\nTask Details:"
-            f"\n- Concept: {concept.concept}"
-            f"\n- Description: {concept.description}"
-            f"\n- Difficulty: {beginner_task.difficulty}"
-            f"\n- Objective: {beginner_task.objective}"
-            f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
-            f"\n\nPREVIOUSLY COVERED CONCEPTS (this is a new concept): {', '.join(existing_concepts) if existing_concepts else 'None'}"
-            f"\n\n✅ Create directory: {PATHS.game_name}/{task_id}/"
-            f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
-            f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
-            f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
-            f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
-            f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
-            f"Use proper Jinja template variables and follow all established patterns. "
-            f"Make sure all files are syntactically correct and tests will pass."
-        )
-        
-        # Create initial state object
-        initial_state = InitialWorkflowState(
-            prompt=task_prompt,
-            target_topic=target_topic,
-            task_id=task_id,
-            concept_description=concept.description,
-            difficulty=beginner_task.difficulty,
-            objective=beginner_task.objective,
-            retry_count=0,
-            max_retries=3
-        )
-        
-        workflow_succeeded = False
-        
-        async for event in workflow.run_stream(initial_state):
-            if isinstance(event, WorkflowEvent):
-                if event.data and isinstance(event.data, str) and event.data.strip():
-                    if "successfully generated" in event.data:
-                        workflow_succeeded = True
-        
-        # Save concept to memory only if workflow succeeded
-        if workflow_succeeded:
-            idea_memory.add_structured_concept(concept)
-            logging.info(f"\n💾 Saved concept to memory: {concept.concept}")
+        for iteration in range(num_iterations):
+            logging.info(f"\n[ITERATION {iteration + 1}/{num_iterations}] Starting task generation...")
+            
+            reset_minikube(iteration)
+            
+
+            # Step 1: Generate unique task idea
+            concept = await generate_task_idea(idea_agent, idea_memory)
+            
+            beginner_task = concept.variations[0]
+            target_topic = concept.concept
+            task_id = beginner_task.task_id
+            
+            # Step 2: Run workflow
+            logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
+            
+            # Get existing tasks
+            game_dir = PATHS.game_root
+            existing_tasks = []
+            if game_dir.exists():
+                existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
+            
+            # Get existing concepts
+            existing_concepts = []
+            if idea_memory.generated_ideas:
+                existing_concepts = [idea['concept'] for idea in idea_memory.generated_ideas.values()]
+            
+            task_prompt = (
+                f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
+                f"\n\nTask Details:"
+                f"\n- Concept: {concept.concept}"
+                f"\n- Description: {concept.description}"
+                f"\n- Difficulty: {beginner_task.difficulty}"
+                f"\n- Objective: {beginner_task.objective}"
+                f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
+                f"\n\nPREVIOUSLY COVERED CONCEPTS (this is a new concept): {', '.join(existing_concepts) if existing_concepts else 'None'}"
+                f"\n\n✅ Create directory: {PATHS.game_name}/{task_id}/"
+                f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
+                f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
+                f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+                f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
+                f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
+                f"Use proper Jinja template variables and follow all established patterns. "
+                f"Make sure all files are syntactically correct and tests will pass."
+            )
+            
+            # Create initial state object
+            initial_state = InitialWorkflowState(
+                prompt=task_prompt,
+                target_topic=target_topic,
+                task_id=task_id,
+                concept_description=concept.description,
+                difficulty=beginner_task.difficulty,
+                objective=beginner_task.objective,
+                retry_count=0,
+                max_retries=3
+            )
+            
+            workflow_succeeded = False
+            
+            # Run workflow fresh so each retry recreates agents and Azure OpenAI clients
+            async for event in workflow.run_stream(initial_state):
+                if isinstance(event, WorkflowEvent):
+                    if event.data and isinstance(event.data, str) and event.data.strip():
+                        if "successfully generated" in event.data:
+                            workflow_succeeded = True
+            
+            # Save concept to appropriate memory
+            if workflow_succeeded:
+                idea_memory.add_structured_concept(concept)
+                logging.info(f"\n💾 Saved concept to success memory: {concept.concept}")
+            else:
+                idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
+                logging.info(f"\n💾 Saved concept to failure memory: {concept.concept}")
+            
+                logging.info(f"\n[ITERATION {iteration + 1}] Complete")
         
         logging.info("\n" + "="*80)
         logging.info("WORKFLOW COMPLETE")

@@ -139,13 +139,19 @@ def clear_last_saved_concept():
 class TaskIdeasMemory(ContextProvider):
     """Memory provider that tracks generated task ideas and injects them as context."""
     
-    def __init__(self, memory_file: str = "task_ideas_memory.json"):
-        """Initialize memory provider with file-based persistence."""
+    def __init__(self,
+                 memory_file: str = "task_ideas_memory.json",
+                 failure_memory_file: str = "task_ideas_failure_memory.json"):
+        """Initialize memory provider with success and failure persistence."""
         project_root = Path(__file__).parent.parent
         self.memory_file = project_root / memory_file
+        self.failure_memory_file = project_root / failure_memory_file
         self.generated_ideas: dict[str, dict] = {}
-        self._ensure_memory_file()
+        self.failed_concepts: dict[str, dict] = {}
+        self._ensure_memory_file(self.memory_file)
+        self._ensure_memory_file(self.failure_memory_file)
         self._load_ideas()
+        self._load_failures()
     
     def _load_ideas(self) -> None:
         """Load previously generated ideas from file."""
@@ -156,6 +162,16 @@ class TaskIdeasMemory(ContextProvider):
                     self.generated_ideas = data.get("ideas", {})
             except Exception as e:
                 logging.error(f"Failed to load memory file: {e}")
+
+    def _load_failures(self) -> None:
+        """Load previously failed concepts from file."""
+        if self.failure_memory_file.exists():
+            try:
+                with open(self.failure_memory_file, "r") as f:
+                    data = json.load(f)
+                    self.failed_concepts = data.get("ideas", {})
+            except Exception as e:
+                logging.error(f"Failed to load failure memory file: {e}")
     
     def _save_ideas(self) -> None:
         """Save current ideas to file."""
@@ -165,24 +181,41 @@ class TaskIdeasMemory(ContextProvider):
         except Exception as e:
             logging.error(f"Failed to save memory file: {e}")
 
-    def _ensure_memory_file(self) -> None:
+    def _save_failures(self) -> None:
+        """Save failed concepts to file."""
+        try:
+            with open(self.failure_memory_file, "w") as f:
+                json.dump({"ideas": self.failed_concepts}, f, indent=2)
+        except Exception as e:
+            logging.error(f"Failed to save failure memory file: {e}")
+
+    def _ensure_memory_file(self, path: Path) -> None:
         """Create an empty memory file if it does not exist."""
         try:
-            self.memory_file.parent.mkdir(parents=True, exist_ok=True)
-            if not self.memory_file.exists():
-                with open(self.memory_file, "w") as f:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                with open(path, "w") as f:
                     json.dump({"ideas": {}}, f, indent=2)
         except Exception as e:
-            logging.error(f"Failed to initialize memory file: {e}")
+            logging.error(f"Failed to initialize memory file {path}: {e}")
     
     async def invoking(self, messages: ChatMessage | MutableSequence[ChatMessage], **kwargs: Any) -> Context:
         """Inject previously generated concepts as context before each invocation."""
+        blocks = []
         if self.generated_ideas:
             concepts_list = "\n".join([f"- {idea['concept']}" for idea in self.generated_ideas.values()])
-            instructions = (
-                f"IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n{concepts_list}\n\n"
-                f"Generate a NEW and DIFFERENT Kubernetes concept that has NOT been suggested before.\n"
-                f"Provide 3 VARIATIONS of tasks for this concept (Beginner, Intermediate, Advanced)."
+            blocks.append(
+                f"IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n{concepts_list}"
+            )
+        if self.failed_concepts:
+            failed_list = "\n".join([f"- {idea['concept']}" for idea in self.failed_concepts.values()])
+            blocks.append(
+                f"IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n{failed_list}"
+            )
+        if blocks:
+            instructions = "\n\n".join(blocks) + (
+                "\n\nGenerate a NEW and DIFFERENT Kubernetes concept that avoids all items above.\n"
+                "Provide 3 VARIATIONS of tasks for this concept (Beginner, Intermediate, Advanced)."
             )
             return Context(instructions=instructions)
         return Context()
@@ -201,6 +234,18 @@ class TaskIdeasMemory(ContextProvider):
             "tags": concept_data.tags,
         }
         self._save_ideas()
+
+    def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
+        """Record a concept that failed later in the workflow."""
+        task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
+        self.failed_concepts[task_id] = {
+            "concept": concept_data.concept,
+            "description": concept_data.description,
+            "variations": [v.task_id for v in concept_data.variations],
+            "reason": reason,
+            "tags": concept_data.tags,
+        }
+        self._save_failures()
     
     def get_ideas(self) -> list[dict]:
         """Get all recorded ideas."""
