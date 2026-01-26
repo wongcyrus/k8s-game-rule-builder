@@ -15,14 +15,13 @@ import asyncio
 import logging
 import json
 from contextlib import asynccontextmanager
-from typing import Sequence, MutableSequence, Any, Annotated
+from typing import MutableSequence, Any, Annotated
 from pydantic import BaseModel, Field
 
 from agent_framework import (
     MCPStdioTool,
-    ContextProvider,
-    Context,
     ChatMessage,
+    AgentMiddleware,
 )
 from agent_framework.azure import AzureOpenAIChatClient
 from azure.identity import AzureCliCredential
@@ -136,8 +135,8 @@ def clear_last_saved_concept():
     _last_saved_concept = None
 
 
-class TaskIdeasMemory(ContextProvider):
-    """Memory provider that tracks generated task ideas and injects them as context."""
+class TaskIdeasMemory:
+    """Memory store for generated and failed task ideas."""
     
     def __init__(self,
                  memory_file: str = "task_ideas_memory.json",
@@ -199,26 +198,45 @@ class TaskIdeasMemory(ContextProvider):
         except Exception as e:
             logging.error(f"Failed to initialize memory file {path}: {e}")
     
-    async def invoking(self, messages: ChatMessage | MutableSequence[ChatMessage], **kwargs: Any) -> Context:
-        """Inject previously generated concepts as context before each invocation."""
-        blocks = []
-        if self.generated_ideas:
-            concepts_list = "\n".join([f"- {idea['concept']}" for idea in self.generated_ideas.values()])
+class TaskIdeasMemoryMiddleware(AgentMiddleware):
+    """Middleware that injects task idea memory into agent prompt reliably (Python SDK)."""
+    def __init__(self, memory: TaskIdeasMemory):
+        self.memory = memory
+
+    async def process(self, context, next):
+        # Always inject a baseline guard instruction (even on first run)
+        blocks = [
+            "You MUST generate a Kubernetes task concept that is novel, practical, and not a trivial or duplicate example."
+            " Select a concept suitable for a learning game and avoid overly common demos unless memory explicitly allows them."
+        ]
+
+        # Append success-memory constraints when available
+        if self.memory.generated_ideas:
+            concepts_list = "\n".join(
+                f"- {idea['concept']}" for idea in self.memory.generated_ideas.values()
+            )
             blocks.append(
-                f"IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n{concepts_list}"
+                "IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n"
+                + concepts_list
             )
-        if self.failed_concepts:
-            failed_list = "\n".join([f"- {idea['concept']}" for idea in self.failed_concepts.values()])
+
+        # Append failure-memory constraints when available
+        if self.memory.failed_concepts:
+            failed_list = "\n".join(
+                f"- {idea['concept']}" for idea in self.memory.failed_concepts.values()
+            )
             blocks.append(
-                f"IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n{failed_list}"
+                "IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n"
+                + failed_list
             )
-        if blocks:
-            instructions = "\n\n".join(blocks) + (
-                "\n\nGenerate a NEW and DIFFERENT Kubernetes concept that avoids all items above.\n"
-                "Provide 3 VARIATIONS of tasks for this concept (Beginner, Intermediate, Advanced)."
-            )
-            return Context(instructions=instructions)
-        return Context()
+
+        injected = "\n\n".join(blocks)
+        logging.info("✅ Injecting task ideas constraints via middleware")
+
+        # Prepend a SYSTEM message so it reliably conditions the model
+        context.messages.insert(0, ChatMessage(role="system", content=injected))
+
+        await next(context)
     
     def add_structured_concept(self, concept_data: K8sTaskConcept) -> None:
         """Add a structured concept to memory."""
@@ -234,6 +252,32 @@ class TaskIdeasMemory(ContextProvider):
             "tags": concept_data.tags,
         }
         self._save_ideas()
+
+    # --- Failure memory (backwards compatibility) ---
+    def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
+        """Record a concept that failed later in the workflow."""
+        task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
+        self.failed_concepts[task_id] = {
+            "concept": concept_data.concept,
+            "description": concept_data.description,
+            "variations": [v.task_id for v in concept_data.variations],
+            "reason": reason,
+            "tags": concept_data.tags,
+        }
+        self._save_failures()
+
+    # Compatibility API (used by workflow)
+    def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
+        """Record a concept that failed later in the workflow (compatibility method)."""
+        task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
+        self.failed_concepts[task_id] = {
+            "concept": concept_data.concept,
+            "description": concept_data.description,
+            "variations": [v.task_id for v in concept_data.variations],
+            "reason": reason,
+            "tags": concept_data.tags,
+        }
+        self._save_failures()
 
     def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
         """Record a concept that failed later in the workflow."""
@@ -258,38 +302,12 @@ class TaskIdeasMemory(ContextProvider):
 
 
 
-@asynccontextmanager
-async def get_k8s_task_idea_agent():
-    """Create and return a Kubernetes task idea generator agent with memory.
-    
-    For standalone usage with its own MCP tool context.
-    Yields: Tuple of (agent, memory)
-    """
-    chat_client = AzureOpenAIChatClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
-        credential=AzureCliCredential(),
-    )
-    
-    memory = TaskIdeasMemory()
-    
-    mcp_tool = MCPStdioTool(
-        name="filesystem",
-        command="npx",
-        args=["-y", "@modelcontextprotocol/server-filesystem", str(PATHS.k8s_docs_root)],
-        load_prompts=False
-    )
-    
-    async with mcp_tool:
-        agent = chat_client.as_agent(
-            name="K8sTaskIdeaAgent",
-            instructions=IDEA_AGENT_INSTRUCTIONS,
-            tools=[mcp_tool, save_k8s_task_concept],
-            tool_choice="auto",
-            context_providers=[memory],
-            middleware=[LoggingFunctionMiddleware()],
-        )
-        yield agent, memory
+"""
+NOTE:
+The standalone agent factory has been removed.
+Use create_idea_agent_with_mcp(mcp_tool) everywhere to ensure a single,
+consistent construction path with memory injection.
+"""
 
 
 async def create_idea_agent_with_mcp(mcp_tool):
@@ -313,26 +331,10 @@ async def create_idea_agent_with_mcp(mcp_tool):
         instructions=IDEA_AGENT_INSTRUCTIONS,
         tools=[mcp_tool, save_k8s_task_concept],
         tool_choice="auto",
-        middleware=[LoggingFunctionMiddleware()],
+        middleware=[
+            TaskIdeasMemoryMiddleware(memory),
+            LoggingFunctionMiddleware(),
+        ],
     )
 
     return agent, memory
-
-
-if __name__ == "__main__":
-    async def main():
-        async with get_k8s_task_idea_agent() as (agent, memory):
-            for round_num in range(3):
-                clear_last_saved_concept()
-                
-                result = await agent.run(
-                    "Based on Kubernetes documentation, suggest a NEW concept not yet covered. "
-                    "Generate 3 task variations (Beginner, Intermediate, Advanced) with full details. "
-                    "Call save_k8s_task_concept to save your concept."
-                )
-                
-                concept = get_last_saved_concept()
-                if concept:
-                    memory.add_structured_concept(concept)
-
-    asyncio.run(main())

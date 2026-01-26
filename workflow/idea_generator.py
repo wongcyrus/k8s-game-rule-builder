@@ -7,7 +7,7 @@ from agents.k8s_task_idea_agent import (
 )
 
 
-async def generate_task_idea(idea_agent, idea_memory) -> K8sTaskConcept:
+async def generate_task_idea(idea_agent, idea_memory):
     """Generate a unique task idea using the idea agent.
     
     Args:

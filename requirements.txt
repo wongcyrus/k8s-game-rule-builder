@@ -17,6 +17,7 @@ pytest-timeout
 agent-framework[viz] --pre
 
 pyyaml
+pydantic
 
 
 # Add your project-specific dependencies below

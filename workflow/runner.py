@@ -31,7 +31,7 @@ def reset_minikube(iteration):
     try:
         logging.info(f"[ITERATION {iteration + 1}] Cleaning up minikube...")
         result = subprocess.run(
-            ["minikube", "delete", "--purge"],
+            ["minikube", "delete"],
             capture_output=True,
             text=True,
             timeout=120
@@ -74,12 +74,6 @@ async def run_workflow():
     logging.info("K8S TASK GENERATION WORKFLOW")
     logging.info("="*80)
     
-    credential = AzureCliCredential()
-    responses_client = AzureOpenAIResponsesClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
-        credential=credential,
-    )
     
     # Create MCP tools
     docs_mcp_tool = MCPStdioTool(
@@ -184,10 +178,34 @@ async def run_workflow():
             
             # Save concept to appropriate memory
             if workflow_succeeded:
-                idea_memory.add_structured_concept(concept)
+                # Backward-compatible success recording (handles stale imports)
+                if hasattr(idea_memory, "add_structured_concept"):
+                    idea_memory.add_structured_concept(concept)
+                else:
+                    task_id = concept.concept.replace(" ", "_").replace("*", "").lower()
+                    idea_memory.generated_ideas[task_id] = {
+                        "concept": concept.concept,
+                        "description": concept.description,
+                        "variations": [v.task_id for v in concept.variations],
+                        "difficulty": "Mixed",
+                        "tags": concept.tags,
+                    }
+                    idea_memory._save_ideas()
                 logging.info(f"\n💾 Saved concept to success memory: {concept.concept}")
             else:
-                idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
+                # Backward-compatible failure recording (handles stale imports)
+                if hasattr(idea_memory, "add_failed_concept"):
+                    idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
+                else:
+                    task_id = concept.concept.replace(" ", "_").replace("*", "").lower()
+                    idea_memory.failed_concepts[task_id] = {
+                        "concept": concept.concept,
+                        "description": concept.description,
+                        "variations": [v.task_id for v in concept.variations],
+                        "reason": "Workflow validation failed",
+                        "tags": concept.tags,
+                    }
+                    idea_memory._save_failures()
                 logging.info(f"\n💾 Saved concept to failure memory: {concept.concept}")
             
                 logging.info(f"\n[ITERATION {iteration + 1}] Complete")
