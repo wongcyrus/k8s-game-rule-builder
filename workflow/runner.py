@@ -91,51 +91,46 @@ async def run_workflow():
     )
     
     async with docs_mcp_tool, tests_mcp_tool:
-        # Create agents
-        idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
-        
-        # Build workflow
-        workflow, generator_executor, fixer_executor = await build_workflow(tests_mcp_tool)
-        
-        # Generate workflow visualization
-        viz = WorkflowViz(workflow)
-        print(viz.to_mermaid())
-        print(viz.to_digraph())
-        
-        try:
-            viz.save_png("workflow_graph.png")
-        except Exception:
-            pass
-        # Loop X times to generate multiple tasks
         num_iterations = 80  # You can adjust this number
-        
+
         for iteration in range(num_iterations):
             logging.info(f"\n[ITERATION {iteration + 1}/{num_iterations}] Starting task generation...")
-            
             reset_minikube(iteration)
-            
+
+            # Create a new agent and workflow for each iteration
+            idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
+            workflow, generator_executor, fixer_executor = await build_workflow(tests_mcp_tool)
+
+            # Generate workflow visualization (optional, can be moved outside loop if not needed per iteration)
+            viz = WorkflowViz(workflow)
+            print(viz.to_mermaid())
+            print(viz.to_digraph())
+            try:
+                viz.save_png("workflow_graph.png")
+            except Exception:
+                pass
 
             # Step 1: Generate unique task idea
             concept = await generate_task_idea(idea_agent, idea_memory)
-            
+
             beginner_task = concept.variations[0]
             target_topic = concept.concept
             task_id = beginner_task.task_id
-            
+
             # Step 2: Run workflow
             logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
-            
+
             # Get existing tasks
             game_dir = PATHS.game_root
             existing_tasks = []
             if game_dir.exists():
                 existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
-            
+
             # Get existing concepts
             existing_concepts = []
             if idea_memory.generated_ideas:
                 existing_concepts = [idea['concept'] for idea in idea_memory.generated_ideas.values()]
-            
+
             task_prompt = (
                 f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
                 f"\n\nTask Details:"
@@ -154,7 +149,7 @@ async def run_workflow():
                 f"Use proper Jinja template variables and follow all established patterns. "
                 f"Make sure all files are syntactically correct and tests will pass."
             )
-            
+
             # Create initial state object
             initial_state = InitialWorkflowState(
                 prompt=task_prompt,
@@ -166,16 +161,16 @@ async def run_workflow():
                 retry_count=0,
                 max_retries=3
             )
-            
+
             workflow_succeeded = False
-            
+
             # Run workflow fresh so each retry recreates agents and Azure OpenAI clients
             async for event in workflow.run_stream(initial_state):
                 if isinstance(event, WorkflowEvent):
                     if event.data and isinstance(event.data, str) and event.data.strip():
                         if "successfully generated" in event.data:
                             workflow_succeeded = True
-            
+
             # Save concept to appropriate memory
             if workflow_succeeded:
                 # Backward-compatible success recording (handles stale imports)
@@ -207,9 +202,9 @@ async def run_workflow():
                     }
                     idea_memory._save_failures()
                 logging.info(f"\n💾 Saved concept to failure memory: {concept.concept}")
-            
-                logging.info(f"\n[ITERATION {iteration + 1}] Complete")
-        
+
+            logging.info(f"\n[ITERATION {iteration + 1}] Complete")
+
         logging.info("\n" + "="*80)
         logging.info("WORKFLOW COMPLETE")
         logging.info("="*80)
