@@ -9,7 +9,7 @@ from agent_framework import (
     WorkflowEvent,
     WorkflowViz,
 )
-from agent_framework.azure import AzureOpenAIResponsesClient
+from agent_framework.openai import OpenAIChatClient
 from azure.identity import AzureCliCredential
 
 from agents.config import PATHS, AZURE
@@ -21,8 +21,12 @@ from workflow.models import InitialWorkflowState
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s %(levelname)s [%(name)s] %(message)s'
 )
+# Suppress noisy third-party loggers
+logging.getLogger("azure").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("agent_framework").setLevel(logging.WARNING)
 
 
 def reset_minikube(iteration):
@@ -45,7 +49,7 @@ def reset_minikube(iteration):
         # Start minikube after delete
         logging.info(f"[ITERATION {iteration + 1}] Starting minikube...")
         start_result = subprocess.run(
-            ["minikube", "start"],
+            ["minikube", "start", "--driver=docker", "--listen-address=127.0.0.1", "--apiserver-names=localhost", "--ports=127.0.0.1:8443:8443"],
             capture_output=True,
             text=True,
             timeout=300
@@ -101,14 +105,14 @@ async def run_workflow():
             idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
             workflow, generator_executor, fixer_executor = await build_workflow(tests_mcp_tool)
 
-            # Generate workflow visualization (optional, can be moved outside loop if not needed per iteration)
-            viz = WorkflowViz(workflow)
-            print(viz.to_mermaid())
-            print(viz.to_digraph())
-            try:
-                viz.save_png("workflow_graph.png")
-            except Exception:
-                pass
+            # Generate workflow visualization only on first iteration
+            if iteration == 0:
+                viz = WorkflowViz(workflow)
+                try:
+                    viz.save_png("workflow_graph.png")
+                    logging.info("Saved workflow graph to workflow_graph.png")
+                except Exception:
+                    pass
 
             # Step 1: Generate unique task idea
             concept = await generate_task_idea(idea_agent, idea_memory)
@@ -140,7 +144,8 @@ async def run_workflow():
                 f"\n- Objective: {beginner_task.objective}"
                 f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
                 f"\n\nPREVIOUSLY COVERED CONCEPTS (this is a new concept): {', '.join(existing_concepts) if existing_concepts else 'None'}"
-                f"\n\n✅ Create directory: {PATHS.game_name}/{task_id}/"
+                f"\n\n✅ Directory already created: {PATHS.game_root}/{task_id}/"
+                f"\nWrite all files directly into this directory. Do NOT call create_directory."
                 f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
                 f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
                 f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
@@ -165,8 +170,8 @@ async def run_workflow():
             workflow_succeeded = False
 
             # Run workflow fresh so each retry recreates agents and Azure OpenAI clients
-            async for event in workflow.run_stream(initial_state):
-                if isinstance(event, WorkflowEvent):
+            async for event in workflow.run(initial_state, stream=True):
+                if event.type == "output":
                     if event.data and isinstance(event.data, str) and event.data.strip():
                         if "successfully generated" in event.data:
                             workflow_succeeded = True

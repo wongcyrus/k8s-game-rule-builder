@@ -20,10 +20,10 @@ from pydantic import BaseModel, Field
 
 from agent_framework import (
     MCPStdioTool,
-    ChatMessage,
+    Message,
     AgentMiddleware,
 )
-from agent_framework.azure import AzureOpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 from azure.identity import AzureCliCredential
 from agents.logging_middleware import LoggingFunctionMiddleware
 from agents.config import PATHS, AZURE
@@ -203,7 +203,7 @@ class TaskIdeasMemoryMiddleware(AgentMiddleware):
     def __init__(self, memory: TaskIdeasMemory):
         self.memory = memory
 
-    async def process(self, context, next):
+    async def process(self, context, call_next):
         # Always inject a baseline guard instruction (even on first run)
         blocks = [
             "You MUST generate a Kubernetes task concept that is novel, practical, and not a trivial or duplicate example."
@@ -234,9 +234,9 @@ class TaskIdeasMemoryMiddleware(AgentMiddleware):
         logging.info("✅ Injecting task ideas constraints via middleware")
 
         # Prepend a SYSTEM message so it reliably conditions the model
-        context.messages.insert(0, ChatMessage(role="system", content=injected))
+        context.messages.insert(0, Message(role="system", contents=[injected]))
 
-        await next(context)
+        await call_next()
     
     def add_structured_concept(self, concept_data: K8sTaskConcept) -> None:
         """Add a structured concept to memory."""
@@ -254,31 +254,6 @@ class TaskIdeasMemoryMiddleware(AgentMiddleware):
         self._save_ideas()
 
     # --- Failure memory (backwards compatibility) ---
-    def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
-        """Record a concept that failed later in the workflow."""
-        task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
-        self.failed_concepts[task_id] = {
-            "concept": concept_data.concept,
-            "description": concept_data.description,
-            "variations": [v.task_id for v in concept_data.variations],
-            "reason": reason,
-            "tags": concept_data.tags,
-        }
-        self._save_failures()
-
-    # Compatibility API (used by workflow)
-    def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
-        """Record a concept that failed later in the workflow (compatibility method)."""
-        task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
-        self.failed_concepts[task_id] = {
-            "concept": concept_data.concept,
-            "description": concept_data.description,
-            "variations": [v.task_id for v in concept_data.variations],
-            "reason": reason,
-            "tags": concept_data.tags,
-        }
-        self._save_failures()
-
     def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
         """Record a concept that failed later in the workflow."""
         task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
@@ -317,20 +292,20 @@ async def create_idea_agent_with_mcp(mcp_tool):
     Args: mcp_tool - An already initialized MCPStdioTool instance for K8s docs
     Returns: Tuple of (agent, memory)
     """
-    chat_client = AzureOpenAIChatClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
+    chat_client = OpenAIChatCompletionClient(
+        azure_endpoint=AZURE.endpoint,
+        model=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
     
-    chat_client.function_invocation_configuration.max_consecutive_errors_per_request = 10
+    chat_client.function_invocation_configuration["max_consecutive_errors_per_request"] = 10
     memory = TaskIdeasMemory()
     
     agent = chat_client.as_agent(
         name="K8sTaskIdeaAgent",
         instructions=IDEA_AGENT_INSTRUCTIONS,
         tools=[mcp_tool, save_k8s_task_concept],
-        tool_choice="auto",
+        default_options={"tool_choice": "auto"},
         middleware=[
             TaskIdeasMemoryMiddleware(memory),
             LoggingFunctionMiddleware(),

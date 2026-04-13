@@ -10,9 +10,6 @@ import re
 from typing import Any
 from .config import PATHS
 
-logging.basicConfig(level=logging.INFO)
-
-
 def _result(is_valid: bool, reason: str, details: list[Any] | None = None) -> dict[str, Any]:
     return {"is_valid": is_valid, "reason": reason, "details": details or []}
 

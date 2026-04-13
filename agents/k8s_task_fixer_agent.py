@@ -7,13 +7,10 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from agent_framework import MCPStdioTool
-from agent_framework.azure import AzureOpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
 from .config import PATHS, AZURE
-
-logging.basicConfig(level=logging.INFO)
-
 
 def _get_fixer_instructions():
     """Get the fixer agent instructions."""
@@ -23,23 +20,31 @@ def _get_fixer_instructions():
         "Your job is to FIX existing failed tasks, NOT regenerate them from scratch.\n"
         "\n"
         f"=== PATHS ===\n"
-        f"Filesystem root: {PATHS.tests_root}\n"
-        f"Failed tasks are in: {PATHS.game_name}/XXX_task_name/\n"
-        f"Fixed tasks stay in: {PATHS.game_name}/XXX_task_name/ (same location)\n"
+        f"The MCP filesystem is rooted at: {PATHS.tests_root.parent}\n"
+        f"You MUST use ABSOLUTE paths for ALL file operations.\n"
+        f"Task directory: {PATHS.game_root}/XXX_task_name/\n"
+        "\n"
+        f"⚠️  CRITICAL PATH RULES:\n"
+        f"✅ CORRECT: {PATHS.game_root}/050_secrets/file.py  (absolute path)\n"
+        f"❌ WRONG:   tests/{PATHS.game_name}/050_secrets/file.py  (relative — will resolve to wrong location)\n"
+        f"❌ WRONG:   {PATHS.game_name}/050_secrets/file.py  (relative — will resolve to wrong location)\n"
+        "\n"
+        f"⚠️  The task directory is pre-created for you. Just write files directly.\n"
+        f"Do NOT call create_directory — it already exists.\n"
         "\n"
         "=== YOUR APPROACH ===\n"
-        "1. READ ALL existing task files from {PATHS.game_name}/XXX_task_name/\n"
+        f"1. READ ALL existing task files from the task directory (e.g. {PATHS.game_root}/XXX_task_name/)\n"
         "2. ANALYZE the specific errors from the failure information provided\n"
         "3. IDENTIFY which specific files are broken\n"
         "4. Make TARGETED FIXES to ONLY the problematic files\n"
-        "5. WRITE ONLY the fixed files back to {PATHS.game_name}/XXX_task_name/\n"
+        f"5. WRITE ONLY the fixed files back (e.g. {PATHS.game_root}/XXX_task_name/file.py)\n"
         "\n"
         "⚠️  CRITICAL: DO NOT rewrite all files! Only fix the broken ones!\n"
         "\n"
         "=== FILE WRITING STRATEGY ===\n"
         "You MUST fix files IN PLACE in the game folder:\n"
         "\n"
-        "Step 1: Read ALL files from {PATHS.game_name}/XXX_task_name/ to understand the complete task\n"
+        f"Step 1: Read ALL files from the task directory (e.g. {PATHS.game_root}/XXX_task_name/) to understand the complete task\n"
         "\n"
         "Step 2: Identify ONLY the broken files based on error messages:\n"
         "  - Validation error about missing file? → Create that file\n"
@@ -47,7 +52,7 @@ def _get_fixer_instructions():
         "  - Test failure in test_02_ready.py? → Fix only test_02_ready.py\n"
         "  - Template variable error in answer.template.yaml? → Fix only answer.template.yaml\n"
         "\n"
-        "Step 3: Write ONLY the fixed files back to {PATHS.game_name}/XXX_task_name/\n"
+        f"Step 3: Write ONLY the fixed files back using absolute paths (e.g. {PATHS.game_root}/XXX_task_name/test_02_ready.py)\n"
         "  - If test_02_ready.py is broken → Write only test_02_ready.py\n"
         "  - If session.json has errors → Write only session.json\n"
         "  - If multiple files are broken → Write only those specific files\n"
@@ -330,21 +335,20 @@ def _get_fixer_instructions():
 
 async def create_fixer_agent_with_mcp(mcp_tool):
     """Create fixer agent with MCP tool."""
-    chat_client = AzureOpenAIChatClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
+    chat_client = OpenAIChatCompletionClient(
+        azure_endpoint=AZURE.endpoint,
+        model=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
     
     # Allow retries for file operations
-    chat_client.function_invocation_configuration.max_consecutive_errors_per_request = 15
+    chat_client.function_invocation_configuration["max_consecutive_errors_per_request"] = 15
     
     agent = chat_client.as_agent(
         name="K8sTaskFixerAgent",
         instructions=_get_fixer_instructions(),
-        temperature=0,
         tools=mcp_tool,
-        tool_choice="auto",
+        default_options={"tool_choice": "auto"},
         middleware=[LoggingFunctionMiddleware()],
     )
     

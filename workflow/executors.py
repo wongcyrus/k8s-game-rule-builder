@@ -7,8 +7,7 @@ from typing_extensions import Never
 from agent_framework import (
     AgentExecutorRequest,
     AgentExecutorResponse,
-    ChatMessage,
-    Role,
+    Message,
     WorkflowContext,
     executor,
 )
@@ -23,6 +22,8 @@ from workflow.models import (
     CombinedValidationResult,
 )
 
+_MISSING = object()  # sentinel for get_state fallback detection
+
 
 @executor(id="initialize_retry")
 async def initialize_retry(message: str | AgentExecutorRequest | InitialWorkflowState, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
@@ -31,31 +32,38 @@ async def initialize_retry(message: str | AgentExecutorRequest | InitialWorkflow
     
     if isinstance(message, InitialWorkflowState):
         logging.info("First run - initializing shared state from InitialWorkflowState")
-        await ctx.set_shared_state("task_id", message.task_id)
-        await ctx.set_shared_state("target_topic", message.target_topic)
-        await ctx.set_shared_state("concept_description", message.concept_description)
-        await ctx.set_shared_state("difficulty", message.difficulty)
-        await ctx.set_shared_state("objective", message.objective)
-        await ctx.set_shared_state("retry_count", message.retry_count)
-        await ctx.set_shared_state("max_retries", message.max_retries)
+        ctx.set_state("task_id", message.task_id)
+        ctx.set_state("target_topic", message.target_topic)
+        ctx.set_state("concept_description", message.concept_description)
+        ctx.set_state("difficulty", message.difficulty)
+        ctx.set_state("objective", message.objective)
+        ctx.set_state("retry_count", message.retry_count)
+        ctx.set_state("max_retries", message.max_retries)
         logging.info(f"Set state: task_id={message.task_id}, topic={message.target_topic}")
         
+        # Pre-create the task directory so the agent can write files immediately
+        task_dir = PATHS.game_root / message.task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f"Pre-created task directory: {task_dir}")
+        
         request = AgentExecutorRequest(
-            messages=[ChatMessage(Role.USER, text=message.prompt)],
+            messages=[Message(role="user", contents=[message.prompt])],
             should_respond=True
         )
     else:
-        try:
-            task_id = await ctx.get_shared_state("task_id")
-            target_topic = await ctx.get_shared_state("target_topic")
-            logging.info(f"Retry: State found: task_id={task_id}, topic={target_topic}")
-        except KeyError as e:
-            logging.error(f"Missing required shared state: {e}")
-            raise
+        task_id = ctx.get_state("task_id", _MISSING)
+        target_topic = ctx.get_state("target_topic", _MISSING)
+        if task_id is _MISSING or target_topic is _MISSING:
+            raise KeyError(f"Missing required shared state: task_id={task_id}, target_topic={target_topic}")
+        logging.info(f"Retry: State found: task_id={task_id}, topic={target_topic}")
+        
+        # Ensure directory exists on retries too
+        task_dir = PATHS.game_root / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
         
         if isinstance(message, str):
             request = AgentExecutorRequest(
-                messages=[ChatMessage(Role.USER, text=message)],
+                messages=[Message(role="user", contents=[message])],
                 should_respond=True
             )
         else:
@@ -69,23 +77,19 @@ async def parse_generated_task(response: AgentExecutorResponse, ctx: WorkflowCon
     """Parse task generation response and extract task info."""
     logging.info("\n[STEP] Parsing generated task...")
     
-    try:
-        await ctx.get_shared_state("retry_count")
-    except KeyError:
-        await ctx.set_shared_state("retry_count", 0)
+    if ctx.get_state("retry_count", _MISSING) is _MISSING:
+        ctx.set_state("retry_count", 0)
     
-    try:
-        await ctx.get_shared_state("max_retries")
-    except KeyError:
-        await ctx.set_shared_state("max_retries", 3)
+    if ctx.get_state("max_retries", _MISSING) is _MISSING:
+        ctx.set_state("max_retries", 3)
     
-    try:
-        task_id = await ctx.get_shared_state("task_id")
-    except KeyError:
+    task_id = ctx.get_state("task_id", _MISSING)
+    if task_id is _MISSING:
         text = response.agent_response.text
-        task_id_match = re.search(rf'{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
+        # Try absolute path first, then relative, then bare ID
+        task_id_match = re.search(rf'{re.escape(str(PATHS.game_root))}/(\d{{3}}_[a-z0-9_]+)', text)
         if not task_id_match:
-            task_id_match = re.search(rf'tests/{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
+            task_id_match = re.search(rf'{PATHS.game_name}/(\d{{3}}_[a-z0-9_]+)', text)
         if not task_id_match:
             task_id_match = re.search(r'(\d{3}_[a-z0-9_]+)', text)
         
@@ -135,7 +139,7 @@ async def run_validation(task_info: TaskInfo, ctx: WorkflowContext[TaskWithValid
         task_directory=task_info.task_directory
     )
     
-    await ctx.set_shared_state(f"validation_{validation.task_id}", validation)
+    ctx.set_state(f"validation_{validation.task_id}", validation)
     
     task_with_val = TaskWithValidation(
         task_id=validation.task_id,
@@ -155,23 +159,13 @@ async def run_pytest(task_with_val: TaskWithValidation, ctx: WorkflowContext[Tes
     pytest_command = f"pytest --import-mode=importlib --rootdir=. {task_with_val.task_directory}/"
     result = run_pytest_command(pytest_command)
     
-    logging.info(f"🔍 DEBUG: pytest result keys: {result.keys()}")
-    logging.info(f"🔍 DEBUG: pytest result['details'] exists: {'details' in result}")
-    if 'details' in result:
-        logging.info(f"🔍 DEBUG: pytest result['details'] length: {len(result['details'])}")
-        if len(result['details']) > 0:
-            logging.info(f"🔍 DEBUG: pytest result['details'][0] length: {len(result['details'][0])} chars")
-    
     raw_output = ""
     if result.get("details") and len(result["details"]) > 0:
         raw_output = result["details"][0]
-        logging.info(f"✅ ✅ ✅ Captured raw output length: {len(raw_output)} chars")
-        
-        await ctx.set_shared_state(f"raw_output_{task_with_val.task_id}", raw_output)
-        logging.info(f"✅ ✅ ✅ Saved raw output to shared state for {task_with_val.task_id}")
+        ctx.set_state(f"raw_output_{task_with_val.task_id}", raw_output)
+        logging.debug(f"Saved raw output ({len(raw_output)} chars) for {task_with_val.task_id}")
     else:
-        logging.error(f"❌ ❌ ❌ No raw output captured. Result keys: {result.keys()}")
-        logging.error(f"❌ ❌ ❌ Details: {result.get('details')}")
+        logging.warning(f"No raw output captured for {task_with_val.task_id}")
 
     test_result = TestResult(
         is_valid=result["is_valid"],
@@ -181,8 +175,6 @@ async def run_pytest(task_with_val: TaskWithValidation, ctx: WorkflowContext[Tes
         raw_output=raw_output
     )
     
-    logging.info(f"🔍 DEBUG: Created TestResult with raw_output length: {len(test_result.raw_output)} chars")
-    
     await ctx.send_message(test_result)
 
 
@@ -191,13 +183,10 @@ async def make_decision(test_result: TestResult, ctx: WorkflowContext[CombinedVa
     """Make keep/remove decision based on validation and test results."""
     logging.info("\n[STEP] Making decision...")
     
-    logging.info(f"DEBUG make_decision: test_result type: {type(test_result)}")
-    logging.info(f"DEBUG make_decision: test_result fields: {test_result.model_dump() if hasattr(test_result, 'model_dump') else vars(test_result)}")
-    logging.info(f"DEBUG make_decision: raw_output length: {len(test_result.raw_output)} chars")
+    logging.info(f"Decision for {test_result.task_id}: valid={test_result.is_valid}, reason={test_result.reason}")
     
-    try:
-        validation = await ctx.get_shared_state(f"validation_{test_result.task_id}")
-    except KeyError:
+    validation = ctx.get_state(f"validation_{test_result.task_id}", _MISSING)
+    if validation is _MISSING:
         validation = ValidationResult(
             is_valid=True,
             reason="Validation passed (assumed)",
@@ -205,44 +194,21 @@ async def make_decision(test_result: TestResult, ctx: WorkflowContext[CombinedVa
             task_directory=test_result.task_directory
         )
     
-    try:
-        retry_count = await ctx.get_shared_state("retry_count")
-    except KeyError:
+    retry_count = ctx.get_state("retry_count", _MISSING)
+    if retry_count is _MISSING:
         retry_count = 0
     
-    try:
-        max_retries = await ctx.get_shared_state("max_retries")
-    except KeyError:
+    max_retries = ctx.get_state("max_retries", _MISSING)
+    if max_retries is _MISSING:
         max_retries = 3
     
-    target_topic = ""
-    concept_description = ""
-    difficulty = ""
-    objective = ""
+    target_topic = ctx.get_state("target_topic", "")
+    concept_description = ctx.get_state("concept_description", "")
+    difficulty = ctx.get_state("difficulty", "")
+    objective = ctx.get_state("objective", "")
     
-    try:
-        target_topic = await ctx.get_shared_state("target_topic")
-        logging.info(f"✓ Got target_topic: {target_topic}")
-    except KeyError:
-        logging.warning("✗ target_topic not in shared state")
-    
-    try:
-        concept_description = await ctx.get_shared_state("concept_description")
-        logging.info(f"✓ Got concept_description: {concept_description[:50]}...")
-    except KeyError:
-        logging.warning("✗ concept_description not in shared state")
-    
-    try:
-        difficulty = await ctx.get_shared_state("difficulty")
-        logging.info(f"✓ Got difficulty: {difficulty}")
-    except KeyError:
-        logging.warning("✗ difficulty not in shared state")
-    
-    try:
-        objective = await ctx.get_shared_state("objective")
-        logging.info(f"✓ Got objective: {objective[:50]}...")
-    except KeyError:
-        logging.warning("✗ objective not in shared state")
+    if target_topic:
+        logging.info(f"Task context: topic={target_topic}, difficulty={difficulty}")
     
     combined = CombinedValidationResult(
         validation=validation,
@@ -280,10 +246,10 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[C
     
     # Increment retry count
     retry_count = combined.retry_count + 1
-    await ctx.set_shared_state("retry_count", retry_count)
+    ctx.set_state("retry_count", retry_count)
     
     # Store failure info in shared state for potential final move
-    await ctx.set_shared_state(f"failure_reasons_{combined.test.task_id}", reasons)
+    ctx.set_state(f"failure_reasons_{combined.test.task_id}", reasons)
     
     await ctx.yield_output(
         f"❌ Task {combined.test.task_id} failed checks (attempt {combined.retry_count + 1}/{combined.max_retries}). Reasons: {'; '.join(reasons)}"
@@ -328,11 +294,11 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
             f"This indicates the metadata was not properly passed through the workflow."
         )
     
-    await ctx.set_shared_state("task_id", task_id)
-    await ctx.set_shared_state("target_topic", target_topic)
-    await ctx.set_shared_state("concept_description", concept_description)
-    await ctx.set_shared_state("difficulty", difficulty)
-    await ctx.set_shared_state("objective", objective)
+    ctx.set_state("task_id", task_id)
+    ctx.set_state("target_topic", target_topic)
+    ctx.set_state("concept_description", concept_description)
+    ctx.set_state("difficulty", difficulty)
+    ctx.set_state("objective", objective)
     
     failure_reasons = []
     if not combined.validation.is_valid:
@@ -346,7 +312,8 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
         f"\n\n⚠️  PREVIOUS ATTEMPT FAILED:"
         f"\n{chr(10).join([f'  - {reason}' for reason in failure_reasons])}"
         f"\n\nIMPORTANT: You MUST use the exact task ID '{task_id}' - do not generate a new ID."
-        f"\n\n✅ Create directory: {PATHS.game_name}/{task_id}/"
+        f"\n\n✅ Directory already exists: {PATHS.game_root}/{task_id}/"
+        f"\nWrite all files directly into this directory. Do NOT call create_directory."
         f"\n\nTask Details:"
         f"\n- Concept: {target_topic}"
         f"\n- Description: {concept_description}"
@@ -363,7 +330,7 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
     
     await ctx.send_message(
         AgentExecutorRequest(
-            messages=[ChatMessage(Role.USER, text=generation_prompt)],
+            messages=[Message(role="user", contents=[generation_prompt])],
             should_respond=True
         )
     )
@@ -387,11 +354,11 @@ async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[Agen
             f"This indicates the metadata was not properly passed through the workflow."
         )
     
-    await ctx.set_shared_state("task_id", task_id)
-    await ctx.set_shared_state("target_topic", target_topic)
-    await ctx.set_shared_state("concept_description", concept_description)
-    await ctx.set_shared_state("difficulty", difficulty)
-    await ctx.set_shared_state("objective", objective)
+    ctx.set_state("task_id", task_id)
+    ctx.set_state("target_topic", target_topic)
+    ctx.set_state("concept_description", concept_description)
+    ctx.set_state("difficulty", difficulty)
+    ctx.set_state("objective", objective)
     
     failure_reasons = []
     if not combined.validation.is_valid:
@@ -401,17 +368,17 @@ async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[Agen
     
     # Get raw test output if available
     raw_test_output = ""
-    try:
-        raw_test_output = await ctx.get_shared_state(f"raw_output_{task_id}")
-        logging.info(f"✅ Retrieved raw test output: {len(raw_test_output)} chars")
-    except KeyError:
-        logging.warning(f"⚠️  No raw test output found for {task_id}")
-        if combined.test.raw_output:
-            raw_test_output = combined.test.raw_output
-            logging.info(f"✅ Using raw_output from TestResult: {len(raw_test_output)} chars")
+    val = ctx.get_state(f"raw_output_{task_id}", _MISSING)
+    if val is not _MISSING:
+        raw_test_output = val
+    elif combined.test.raw_output:
+        raw_test_output = combined.test.raw_output
+    
+    if not raw_test_output:
+        logging.warning(f"No raw test output available for {task_id}")
     
     fix_prompt = (
-        f"Fix the failed Kubernetes task '{task_id}' located in '{PATHS.game_name}/{task_id}/'."
+        f"Fix the failed Kubernetes task '{task_id}' located in '{PATHS.game_root}/{task_id}/'."
         f"\n\nThis is fix attempt {combined.retry_count + 1} of {combined.max_retries}."
         f"\n\n⚠️  TASK FAILED WITH THESE ERRORS:"
         f"\n{chr(10).join([f'  - {reason}' for reason in failure_reasons])}"
@@ -425,19 +392,20 @@ async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[Agen
     
     fix_prompt += (
         f"\n\n🔍 YOUR TASK:"
-        f"\n1. READ all files from '{PATHS.game_name}/{task_id}/' to understand the task"
+        f"\n1. READ all files from '{PATHS.game_root}/{task_id}/' to understand the task"
         f"\n2. READ session.json to see available variables"
         f"\n3. READ setup.template.yaml to see what resources are deployed"
         f"\n4. READ answer.template.yaml to understand the solution"
         f"\n5. ANALYZE the specific errors and identify which files are broken"
         f"\n6. Make TARGETED FIXES to ONLY the broken files"
-        f"\n7. WRITE ONLY the fixed files back to '{PATHS.game_name}/{task_id}/'"
+        f"\n7. WRITE ONLY the fixed files back to '{PATHS.game_root}/{task_id}/'"
         f"\n\n⚠️  CRITICAL: DO NOT rewrite all files! Only fix the broken ones!"
         f"\n\n⚠️  FILE WRITING RULES:"
-        f"\n- Task stays in '{PATHS.game_name}/{task_id}/' during retry attempts"
-        f"\n- Read files from '{PATHS.game_name}/{task_id}/'"
+        f"\n- Use ABSOLUTE paths for all file operations — e.g. {PATHS.game_root}/{task_id}/file.py"
+        f"\n- Task stays in '{PATHS.game_root}/{task_id}/' during retry attempts"
+        f"\n- Read files from '{PATHS.game_root}/{task_id}/'"
         f"\n- Identify which specific files are broken from error messages"
-        f"\n- Write ONLY the fixed files back to '{PATHS.game_name}/{task_id}/'"
+        f"\n- Write ONLY the fixed files back to '{PATHS.game_root}/{task_id}/'"
         f"\n- DO NOT write files that are working correctly"
         f"\n- Example: If only test_02_ready.py is broken, write only test_02_ready.py"
         f"\n- Example: If test_02_ready.py and session.json are broken, write only those 2 files"
@@ -480,7 +448,7 @@ async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[Agen
     
     await ctx.send_message(
         AgentExecutorRequest(
-            messages=[ChatMessage(Role.USER, text=fix_prompt)],
+            messages=[Message(role="user", contents=[fix_prompt])],
             should_respond=True
         )
     )
@@ -532,11 +500,11 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
             
             # Increment retry count
             retry_count = combined.retry_count + 1
-            await ctx.set_shared_state("retry_count", retry_count)
+            ctx.set_state("retry_count", retry_count)
             
             # Store failure info
             failure_reasons = [f"Skip answer test validation failed: {new_test_result.reason}"]
-            await ctx.set_shared_state(f"failure_reasons_{combined.test.task_id}", failure_reasons)
+            ctx.set_state(f"failure_reasons_{combined.test.task_id}", failure_reasons)
             
             updated_combined = CombinedValidationResult(
                 validation=combined.validation,
@@ -585,9 +553,8 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
             logging.info(f"Moved task to: {unsuccessful_task_path}")
             
             # Get failure reasons from shared state
-            try:
-                reasons = await ctx.get_shared_state(f"failure_reasons_{combined.test.task_id}")
-            except KeyError:
+            reasons = ctx.get_state(f"failure_reasons_{combined.test.task_id}", _MISSING)
+            if reasons is _MISSING:
                 reasons = []
                 if not combined.validation.is_valid:
                     reasons.append(f"Validation failed: {combined.validation.reason}")
@@ -598,14 +565,11 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
             
             # Get raw test output if available
             raw_test_output = ""
-            try:
-                raw_test_output = await ctx.get_shared_state(f"raw_output_{combined.test.task_id}")
-                logging.info(f"✅ Retrieved raw test output for failure report: {len(raw_test_output)} chars")
-            except KeyError:
-                logging.warning(f"⚠️  No raw test output found for {combined.test.task_id}")
-                if combined.test.raw_output:
-                    raw_test_output = combined.test.raw_output
-                    logging.info(f"✅ Using raw_output from TestResult: {len(raw_test_output)} chars")
+            val = ctx.get_state(f"raw_output_{combined.test.task_id}", _MISSING)
+            if val is not _MISSING:
+                raw_test_output = val
+            elif combined.test.raw_output:
+                raw_test_output = combined.test.raw_output
             
             # Read session.json if it exists
             session_json_content = ""

@@ -3,7 +3,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from agent_framework import MCPStdioTool
-from agent_framework.azure import AzureOpenAIResponsesClient
+from agent_framework.openai import OpenAIChatClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
 from .config import PATHS, AZURE
@@ -19,9 +19,9 @@ async def get_filesystem_agent():
         An agent configured with filesystem tools.
     """
     # Build an agent backed by Azure OpenAI Responses
-    responses_client = AzureOpenAIResponsesClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
+    responses_client = OpenAIChatClient(
+        azure_endpoint=AZURE.endpoint,
+        model=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
     
@@ -48,7 +48,7 @@ async def get_filesystem_agent():
                 "NEVER make up or guess file contents or directory structures."
             ),
             tools=mcp_tool,
-            tool_choice="required",
+            default_options={"tool_choice": "required"},
             middleware=[LoggingFunctionMiddleware()],
         )
         

@@ -5,7 +5,7 @@ import os
 import subprocess
 from typing import Annotated
 from pydantic import Field
-from agent_framework.azure import AzureOpenAIResponsesClient
+from agent_framework.openai import OpenAIChatClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
 from .config import AZURE
@@ -42,9 +42,9 @@ def get_kubernetes_agent():
     Returns:
         An agent with kubectl tools configured.
     """
-    responses_client = AzureOpenAIResponsesClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
+    responses_client = OpenAIChatClient(
+        azure_endpoint=AZURE.endpoint,
+        model=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
 
@@ -58,7 +58,7 @@ def get_kubernetes_agent():
             "For any question about the cluster, you MUST call run_kubectl_command with the appropriate kubectl command."
         ),
         tools=[run_kubectl_command],
-        tool_choice="required",
+        default_options={"tool_choice": "required"},
         middleware=[LoggingFunctionMiddleware()],
     )
     

@@ -31,13 +31,13 @@ class LoggingFunctionMiddleware(FunctionMiddleware):
     async def process(
         self,
         context: FunctionInvocationContext,
-        next: Callable[[FunctionInvocationContext], Awaitable[None]],
+        call_next: Callable[[],  Awaitable[None]],
     ) -> None:
         """Process function invocation with logging.
         
         Args:
             context: The function invocation context containing function details.
-            next: Callable to continue to the next middleware or function execution.
+            call_next: Callable to continue to the next middleware or function execution.
         """
         function_name = context.function.name
         start_time = time.time()
@@ -48,7 +48,7 @@ class LoggingFunctionMiddleware(FunctionMiddleware):
 
         try:
             # Continue to next middleware or function execution
-            await next(context)
+            await call_next()
 
             # Post-processing: Log after function execution
             elapsed_time = time.time() - start_time

@@ -7,12 +7,10 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from agent_framework import MCPStdioTool
-from agent_framework.azure import AzureOpenAIChatClient
+from agent_framework.openai import OpenAIChatCompletionClient
 from azure.identity import AzureCliCredential
 from .logging_middleware import LoggingFunctionMiddleware
 from .config import PATHS, AZURE
-
-logging.basicConfig(level=logging.INFO)
 
 
 def _get_generator_instructions():
@@ -21,12 +19,21 @@ def _get_generator_instructions():
         "You are a Kubernetes task generator with filesystem tools.\n"
         "\n"
         f"=== PATHS ===\n"
-        f"Filesystem root: {PATHS.tests_root}\n"
-        f"Create tasks in: {PATHS.game_name}/XXX_task_name/\n"
-        f"Example: {PATHS.game_name}/050_secrets/instruction.md\n"
+        f"The MCP filesystem is rooted at: {PATHS.tests_root.parent}\n"
+        f"You MUST use ABSOLUTE paths for ALL file operations.\n"
+        f"Task directory: {PATHS.game_root}/XXX_task_name/\n"
+        f"Example file:   {PATHS.game_root}/050_secrets/instruction.md\n"
+        "\n"
+        f"⚠️  CRITICAL PATH RULES:\n"
+        f"✅ CORRECT: {PATHS.game_root}/050_secrets/file.py  (absolute path)\n"
+        f"❌ WRONG:   tests/{PATHS.game_name}/050_secrets/file.py  (relative — will resolve to wrong location)\n"
+        f"❌ WRONG:   {PATHS.game_name}/050_secrets/file.py  (relative — will resolve to wrong location)\n"
+        "\n"
+        f"⚠️  The task directory is pre-created for you. Just write files directly.\n"
+        f"Do NOT call create_directory — it already exists.\n"
         "\n"
         f"=== REQUIRED FILES ===\n"
-        f"Create directory {PATHS.game_name}/XXX_descriptive_name/ with:\n"
+        f"Create directory {PATHS.game_root}/XXX_descriptive_name/ with:\n"
         "\n"
         "1. __init__.py - Empty\n"
         "2. instruction.md - Challenge description with {{variables}}\n"
@@ -261,22 +268,21 @@ def _get_generator_instructions():
 
 async def create_generator_agent_with_mcp(mcp_tool):
     """Create generator agent with MCP tool."""
-    chat_client = AzureOpenAIChatClient(
-        endpoint=AZURE.endpoint,
-        deployment_name=AZURE.deployment_name,
+    chat_client = OpenAIChatCompletionClient(
+        azure_endpoint=AZURE.endpoint,
+        model=AZURE.deployment_name,
         credential=AzureCliCredential(),
     )
     
     # Allow more retries for file generation (10+ files)
-    chat_client.function_invocation_configuration.max_consecutive_errors_per_request = 15
+    chat_client.function_invocation_configuration["max_consecutive_errors_per_request"] = 15
     
     agent = chat_client.as_agent(
         name="K8sTaskGeneratorAgent",
         instructions=_get_generator_instructions(),
         tools=mcp_tool,
-        tool_choice="auto",
+        default_options={"tool_choice": "auto"},
         middleware=[LoggingFunctionMiddleware()],
-        temperature=0,
     )
     
     return agent

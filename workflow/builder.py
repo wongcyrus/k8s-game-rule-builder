@@ -44,8 +44,7 @@ async def build_workflow(tests_mcp_tool: MCPStdioTool):
     fixer_executor = AgentExecutor(fixer_agent, id="fixer_agent")
     
     workflow = (
-        WorkflowBuilder()
-        .set_start_executor(initialize_retry)
+        WorkflowBuilder(start_executor=initialize_retry)
         .add_edge(initialize_retry, generator_executor)
         .add_edge(generator_executor, parse_generated_task)
         .add_edge(parse_generated_task, run_validation)
