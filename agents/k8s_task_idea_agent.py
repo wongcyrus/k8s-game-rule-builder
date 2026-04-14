@@ -289,9 +289,53 @@ async def create_idea_agent_with_mcp(mcp_tool):
     """Create idea agent with an existing MCP tool.
     
     For workflow usage where MCP tool is managed externally.
+    Automatically selects Chat Completions or Responses API based on model.
     Args: mcp_tool - An already initialized MCPStdioTool instance for K8s docs
     Returns: Tuple of (agent, memory)
     """
+    memory = TaskIdeasMemory()
+
+    if AZURE.use_responses_api:
+        from agents.responses_agent import ResponsesAgent
+
+        agent = ResponsesAgent(
+            name="K8sTaskIdeaAgent",
+            instructions=IDEA_AGENT_INSTRUCTIONS,
+            azure_endpoint=AZURE.endpoint,
+            model=AZURE.deployment_name,
+            credential=AzureCliCredential(),
+            mcp_tool=mcp_tool,
+            extra_tools=[save_k8s_task_concept],
+            middleware=[LoggingFunctionMiddleware()],
+            max_consecutive_errors=10,
+        )
+        # Wrap with memory middleware — for ResponsesAgent we inject memory
+        # into the instructions since it doesn't go through AgentMiddleware.
+        # The memory middleware is an AgentMiddleware, not FunctionMiddleware,
+        # so we handle it by pre-injecting constraints into instructions.
+        constraints = []
+        if memory.generated_ideas:
+            concepts_list = "\n".join(
+                f"- {idea['concept']}" for idea in memory.generated_ideas.values()
+            )
+            constraints.append(
+                "IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n"
+                + concepts_list
+            )
+        if memory.failed_concepts:
+            failed_list = "\n".join(
+                f"- {idea['concept']}" for idea in memory.failed_concepts.values()
+            )
+            constraints.append(
+                "IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n"
+                + failed_list
+            )
+        if constraints:
+            agent._instructions = "\n\n".join(constraints) + "\n\n" + agent._instructions
+            logging.info("✅ Injecting task ideas constraints into Responses agent instructions")
+
+        return agent, memory
+
     chat_client = OpenAIChatCompletionClient(
         azure_endpoint=AZURE.endpoint,
         model=AZURE.deployment_name,
@@ -299,7 +343,6 @@ async def create_idea_agent_with_mcp(mcp_tool):
     )
     
     chat_client.function_invocation_configuration["max_consecutive_errors_per_request"] = 10
-    memory = TaskIdeasMemory()
     
     agent = chat_client.as_agent(
         name="K8sTaskIdeaAgent",

@@ -121,6 +121,20 @@ async def run_workflow():
             target_topic = concept.concept
             task_id = beginner_task.task_id
 
+            # Save concept immediately so restarts won't regenerate it
+            if hasattr(idea_memory, "add_structured_concept"):
+                idea_memory.add_structured_concept(concept)
+            else:
+                mem_key = concept.concept.replace(" ", "_").replace("*", "").lower()
+                idea_memory.generated_ideas[mem_key] = {
+                    "concept": concept.concept,
+                    "description": concept.description,
+                    "variations": [v.task_id for v in concept.variations],
+                    "difficulty": "Mixed",
+                    "tags": concept.tags,
+                }
+                idea_memory._save_ideas()
+
             # Step 2: Run workflow
             logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
 
@@ -176,29 +190,16 @@ async def run_workflow():
                         if "successfully generated" in event.data:
                             workflow_succeeded = True
 
-            # Save concept to appropriate memory
+            # Update memory based on workflow outcome
             if workflow_succeeded:
-                # Backward-compatible success recording (handles stale imports)
-                if hasattr(idea_memory, "add_structured_concept"):
-                    idea_memory.add_structured_concept(concept)
-                else:
-                    task_id = concept.concept.replace(" ", "_").replace("*", "").lower()
-                    idea_memory.generated_ideas[task_id] = {
-                        "concept": concept.concept,
-                        "description": concept.description,
-                        "variations": [v.task_id for v in concept.variations],
-                        "difficulty": "Mixed",
-                        "tags": concept.tags,
-                    }
-                    idea_memory._save_ideas()
-                logging.info(f"\n💾 Saved concept to success memory: {concept.concept}")
+                logging.info(f"💾 Task succeeded: {concept.concept}")
             else:
-                # Backward-compatible failure recording (handles stale imports)
+                # Move from success memory to failure memory
                 if hasattr(idea_memory, "add_failed_concept"):
                     idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
                 else:
-                    task_id = concept.concept.replace(" ", "_").replace("*", "").lower()
-                    idea_memory.failed_concepts[task_id] = {
+                    mem_key = concept.concept.replace(" ", "_").replace("*", "").lower()
+                    idea_memory.failed_concepts[mem_key] = {
                         "concept": concept.concept,
                         "description": concept.description,
                         "variations": [v.task_id for v in concept.variations],
@@ -206,7 +207,7 @@ async def run_workflow():
                         "tags": concept.tags,
                     }
                     idea_memory._save_failures()
-                logging.info(f"\n💾 Saved concept to failure memory: {concept.concept}")
+                logging.info(f"💾 Saved concept to failure memory: {concept.concept}")
 
             logging.info(f"\n[ITERATION {iteration + 1}] Complete")
 

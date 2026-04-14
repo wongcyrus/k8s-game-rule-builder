@@ -30,7 +30,26 @@ class Paths:
 @dataclass(frozen=True)
 class AzureOpenAI:
     endpoint: str = "https://cyrus-me23xi26-eastus2.openai.azure.com/"
-    deployment_name: str = "gpt-5.1-chat"
+    deployment_name: str = "gpt-5.2-chat"
+
+    # Models that require the Responses API (no Chat Completions support).
+    # Add model prefixes here as needed.
+    RESPONSES_ONLY_PREFIXES: tuple[str, ...] = (
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5.1-codex",
+        "gpt-5-codex",
+        "gpt-5-pro",
+        "gpt-5.1-codex-max",
+    )
+
+    @property
+    def use_responses_api(self) -> bool:
+        """Whether the configured model requires the Responses API."""
+        return any(
+            self.deployment_name.startswith(prefix)
+            for prefix in self.RESPONSES_ONLY_PREFIXES
+        )
 
 @dataclass(frozen=True)
 class ValidationConfig:

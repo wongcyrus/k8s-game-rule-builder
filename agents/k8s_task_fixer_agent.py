@@ -334,7 +334,25 @@ def _get_fixer_instructions():
 
 
 async def create_fixer_agent_with_mcp(mcp_tool):
-    """Create fixer agent with MCP tool."""
+    """Create fixer agent with MCP tool.
+
+    Automatically selects Chat Completions or Responses API based on model.
+    """
+    if AZURE.use_responses_api:
+        from .responses_agent import ResponsesAgent
+
+        agent = ResponsesAgent(
+            name="K8sTaskFixerAgent",
+            instructions=_get_fixer_instructions(),
+            azure_endpoint=AZURE.endpoint,
+            model=AZURE.deployment_name,
+            credential=AzureCliCredential(),
+            mcp_tool=mcp_tool,
+            middleware=[LoggingFunctionMiddleware()],
+            max_consecutive_errors=15,
+        )
+        return agent
+
     chat_client = OpenAIChatCompletionClient(
         azure_endpoint=AZURE.endpoint,
         model=AZURE.deployment_name,
