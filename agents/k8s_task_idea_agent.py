@@ -43,7 +43,13 @@ IDEA_AGENT_INSTRUCTIONS = (
     "3. Use 3-digit task IDs (001-999) in format: XXX_concept_name_level (e.g., 041_secrets_basic)\n"
     "4. Each variation should build on the previous one with increasing complexity\n"
     "5. Include practical, hands-on scenarios covering: Workloads, Services, Storage, Configuration, Security, Scheduling, Policies\n"
-    "\n**CRITICAL**: You MUST call the save_k8s_task_concept tool to save your generated concept.\n"
+    "\nProvide the concept, tags, description, and 3 variations with task_id, difficulty, title, objective, key_skills, and estimated_time."
+)
+
+# Instructions variant for Responses API models that need tool-call approach
+IDEA_AGENT_INSTRUCTIONS_TOOL_CALL = (
+    IDEA_AGENT_INSTRUCTIONS + "\n\n"
+    "**CRITICAL**: You MUST call the save_k8s_task_concept tool to save your generated concept.\n"
     "The tool requires:\n"
     "- concept: string (core concept name)\n"
     "- tags: list of strings (e.g., ['scheduling', 'networking'])\n"
@@ -290,6 +296,10 @@ async def create_idea_agent_with_mcp(mcp_tool):
     
     For workflow usage where MCP tool is managed externally.
     Automatically selects Chat Completions or Responses API based on model.
+    
+    - Chat Completions: Uses structured outputs (response_format) — no tool needed.
+    - Responses API: Uses tool-call approach (save_k8s_task_concept).
+    
     Args: mcp_tool - An already initialized MCPStdioTool instance for K8s docs
     Returns: Tuple of (agent, memory)
     """
@@ -300,7 +310,7 @@ async def create_idea_agent_with_mcp(mcp_tool):
 
         agent = ResponsesAgent(
             name="K8sTaskIdeaAgent",
-            instructions=IDEA_AGENT_INSTRUCTIONS,
+            instructions=IDEA_AGENT_INSTRUCTIONS_TOOL_CALL,
             azure_endpoint=AZURE.endpoint,
             model=AZURE.deployment_name,
             credential=AzureCliCredential(),
@@ -336,6 +346,7 @@ async def create_idea_agent_with_mcp(mcp_tool):
 
         return agent, memory
 
+    # Chat Completions path — structured outputs via response_format
     chat_client = OpenAIChatCompletionClient(
         azure_endpoint=AZURE.endpoint,
         model=AZURE.deployment_name,
@@ -344,6 +355,9 @@ async def create_idea_agent_with_mcp(mcp_tool):
     
     chat_client.function_invocation_configuration["max_consecutive_errors_per_request"] = 10
     
+    # Use simpler instructions since structured outputs handles the schema.
+    # Keep the MCP tool for reading K8s docs, and save_k8s_task_concept as
+    # a fallback in case the caller uses the tool-call path.
     agent = chat_client.as_agent(
         name="K8sTaskIdeaAgent",
         instructions=IDEA_AGENT_INSTRUCTIONS,
