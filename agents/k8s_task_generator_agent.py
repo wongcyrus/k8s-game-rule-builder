@@ -270,19 +270,24 @@ async def create_generator_agent_with_mcp(mcp_tool):
     """Create generator agent with MCP tool.
 
     Automatically selects Chat Completions or Responses API based on model.
+    Uses the framework's built-in Agent/ChatAgent which handles MCP tool
+    lifecycle (lazy connect, tool calling, etc.) correctly.
     """
     if AZURE.use_responses_api:
-        from .responses_agent import ResponsesAgent
+        from agent_framework.openai import OpenAIChatClient
 
-        agent = ResponsesAgent(
-            name="K8sTaskGeneratorAgent",
-            instructions=_get_generator_instructions(),
+        chat_client = OpenAIChatClient(
             azure_endpoint=AZURE.endpoint,
             model=AZURE.deployment_name,
             credential=AzureCliCredential(),
-            mcp_tool=mcp_tool,
+        )
+
+        agent = chat_client.as_agent(
+            name="K8sTaskGeneratorAgent",
+            instructions=_get_generator_instructions(),
+            tools=mcp_tool,
+            default_options={"tool_choice": "auto"},
             middleware=[LoggingFunctionMiddleware()],
-            max_consecutive_errors=15,
         )
         return agent
 

@@ -309,6 +309,12 @@ class ResponsesAgent:
         """
         from agent_framework import AgentResponseUpdate
 
+        # Ensure MCP tool is connected (lazy init for DevUI compatibility)
+        if not self._mcp_tool._functions:
+            logger.info("MCP tool not yet connected — connecting lazily...")
+            await self._mcp_tool.connect()
+            logger.info(f"MCP tool connected: {len(self._mcp_tool._functions)} functions loaded")
+
         input_text = self._extract_input_text(messages)
         tools = self._build_tools_param()
         consecutive_errors = 0

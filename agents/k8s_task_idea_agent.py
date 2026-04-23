@@ -306,23 +306,10 @@ async def create_idea_agent_with_mcp(mcp_tool):
     memory = TaskIdeasMemory()
 
     if AZURE.use_responses_api:
-        from agents.responses_agent import ResponsesAgent
+        from agent_framework.openai import OpenAIChatClient
 
-        agent = ResponsesAgent(
-            name="K8sTaskIdeaAgent",
-            instructions=IDEA_AGENT_INSTRUCTIONS_TOOL_CALL,
-            azure_endpoint=AZURE.endpoint,
-            model=AZURE.deployment_name,
-            credential=AzureCliCredential(),
-            mcp_tool=mcp_tool,
-            extra_tools=[save_k8s_task_concept],
-            middleware=[LoggingFunctionMiddleware()],
-            max_consecutive_errors=10,
-        )
-        # Wrap with memory middleware — for ResponsesAgent we inject memory
-        # into the instructions since it doesn't go through AgentMiddleware.
-        # The memory middleware is an AgentMiddleware, not FunctionMiddleware,
-        # so we handle it by pre-injecting constraints into instructions.
+        # Build instructions with memory constraints prepended
+        instructions = IDEA_AGENT_INSTRUCTIONS_TOOL_CALL
         constraints = []
         if memory.generated_ideas:
             concepts_list = "\n".join(
@@ -341,8 +328,22 @@ async def create_idea_agent_with_mcp(mcp_tool):
                 + failed_list
             )
         if constraints:
-            agent._instructions = "\n\n".join(constraints) + "\n\n" + agent._instructions
+            instructions = "\n\n".join(constraints) + "\n\n" + instructions
             logging.info("✅ Injecting task ideas constraints into Responses agent instructions")
+
+        chat_client = OpenAIChatClient(
+            azure_endpoint=AZURE.endpoint,
+            model=AZURE.deployment_name,
+            credential=AzureCliCredential(),
+        )
+
+        agent = chat_client.as_agent(
+            name="K8sTaskIdeaAgent",
+            instructions=instructions,
+            tools=[mcp_tool, save_k8s_task_concept],
+            default_options={"tool_choice": "auto"},
+            middleware=[LoggingFunctionMiddleware()],
+        )
 
         return agent, memory
 

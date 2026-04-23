@@ -5,56 +5,18 @@ A Python project for building Kubernetes learning game rules using AI agents pow
 ## Features
 
 - **AI-Powered Task Generation**: Uses Azure OpenAI agents to generate progressive Kubernetes learning tasks (Beginner → Intermediate → Advanced)
-- **Intelligent Memory System**: Prevents duplicate content generation across sessions
-- **MCP Integration**: Leverages the official [Model Context Protocol filesystem server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) for file operations  
+- **Fix-on-Failure Workflow**: Failed tasks are fixed in place by a specialized Fixer Agent instead of regenerated from scratch
+- **Intelligent Memory System**: Tracks generated and failed concepts across sessions to prevent duplicates
+- **MCP Integration**: Leverages the official [Model Context Protocol filesystem server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) for file operations
 - **Automated Test Creation**: Generates complete test suites with setup, validation, and cleanup
 - **Template-Based System**: Uses Jinja2 templates with dynamic variable substitution
+- **Pure Python Validation**: No LLM for validation or testing — faster, more reliable, cost-effective
+- **Retry Loop with Targeted Fixes**: Automatic retry on failure with a Fixer Agent that reads errors and patches only broken files
+- **Responses API Support**: Automatic model detection — uses Chat Completions or Responses API based on the configured deployment
+- **Skip-Answer Validation**: Extra validation step that confirms `test_05_check.py` fails when the answer is not deployed
 - **Comprehensive Logging**: Built-in middleware for debugging and monitoring
-- **Pure Python Validation**: No LLM for validation/testing - faster, more reliable, cost-effective
-- **Retry Loop**: Automatic retry on failure with configurable max retries
-- **Max Consecutive Errors**: Configurable limit (15) for file generation resilience
-
-## Recent Improvements (2026-01-22)
-
-### 1. Validator & PyTest Refactoring
-- **Removed LLM from validation** - Now uses pure Python file checks
-- **Removed LLM from testing** - Now uses direct subprocess execution
-- **Benefits**: Faster (no API calls), more reliable (no hallucinations), cost-effective (no tokens)
-
-### 2. Max Consecutive Errors Configuration
-- **Increased from 3 to 15** - Generator can retry file creation more times
-- **Better resilience** - Handles transient MCP filesystem issues
-- **Verified with logging** - Setting persists through agent creation
-
-### 3. Improved Error Reporting
-- **Specific validation errors** - Shows actual failures instead of "Validation completed"
-- **Multiple errors shown** - Displays first 3 errors with count of remaining
-- **Better debugging** - Clear messages for troubleshooting
-
-### 4. Test File Requirements
-- **test_02_ready.py** (REQUIRED) - Tests that setup resources are ready with polling loops
-- **test_04_challenge.py** (OPTIONAL) - Pre-validation actions for dynamic behaviors
-- **AI-driven analysis** - Generator analyzes setup.template.yaml to create appropriate tests
 
 ## Setup
-
-### Configuration
-
-The project uses a centralized configuration in `agents/config.py`. You can customize:
-
-- **Game Name**: Change the `game_name` field in the `Paths` class to use a different game directory (default: "game02")
-- **Paths**: Adjust `tests_root`, `pytest_rootdir`, and `k8s_docs_root` as needed
-- **Azure OpenAI**: Update endpoint and deployment name in the `AzureOpenAI` class
-
-Example configuration change:
-```python
-# In agents/config.py
-@dataclass(frozen=True)
-class Paths:
-    tests_root: Path = Path("/path/to/your/tests")
-    game_name: str = "game03"  # Change to your game name
-    # ...
-```
 
 ### Quick Start
 
@@ -65,208 +27,296 @@ bash setup.sh
 ```
 
 The setup script will:
-- Create a Python virtual environment
-- Install all required dependencies including agent-framework
+- Create a Python virtual environment (`.venv`)
+- Install Jupyter and IPython kernel
+- Install all dependencies from `requirements.txt`
 
-**Note**: The MCP filesystem server is automatically managed via npx and doesn't require manual installation.
+**Note**: The MCP filesystem server is automatically managed via `npx` and doesn't require manual installation.
 
 ### Manual Setup
 
-If you prefer to set up manually:
-
 ```bash
-# Create virtual environment
 python3 -m venv .venv
-
-# Activate virtual environment
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
+```
+
+### Azure OpenAI Setup
+
+The project authenticates via **Azure CLI credentials** — no API keys in code or environment variables.
+
+1. Install the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli)
+2. Log in:
+   ```bash
+   az login
+   ```
+3. Edit `agents/config.py` to point to your Azure OpenAI resource:
+   ```python
+   @dataclass(frozen=True)
+   class AzureOpenAI:
+       endpoint: str = "https://your-resource-name.openai.azure.com/"
+       deployment_name: str = "gpt-4o"  # Your deployment name
+   ```
+
+That's it. All agents pick up the endpoint and model from this single config.
+
+### Changing the Model
+
+To switch models, change `deployment_name` in `agents/config.py`:
+
+```python
+@dataclass(frozen=True)
+class AzureOpenAI:
+    endpoint: str = "https://your-resource-name.openai.azure.com/"
+    deployment_name: str = "gpt-4o"  # ← change this
+```
+
+The project automatically selects the right API based on the model:
+
+| Model | API Used | How It Works |
+|-------|----------|--------------|
+| `gpt-4o`, `gpt-4`, `gpt-4o-mini`, etc. | Chat Completions | Standard `OpenAIChatCompletionClient` from agent-framework |
+| `gpt-5.3-codex`, `gpt-5-pro`, `gpt-5.1-codex-max`, etc. | Responses API | Custom `ResponsesAgent` with manual tool-call loop |
+
+Detection is based on model prefix matching in `AzureOpenAI.RESPONSES_ONLY_PREFIXES`. If you deploy a new codex/responses-only model, add its prefix there:
+
+```python
+RESPONSES_ONLY_PREFIXES: tuple[str, ...] = (
+    "gpt-5.3-codex",
+    "gpt-5.2-codex",
+    "gpt-5.1-codex",
+    "gpt-5-codex",
+    "gpt-5-pro",
+    "gpt-5.1-codex-max",
+    "your-new-model-prefix",  # ← add here
+)
+```
+
+### Configuration
+
+All paths and settings live in `agents/config.py`:
+
+```python
+@dataclass(frozen=True)
+class Paths:
+    tests_root: Path = Path("/path/to/tests")       # Where game tasks are generated
+    game_name: str = "game02"                        # Target game folder
+    pytest_rootdir: Path = Path("/path/to/project")  # Working dir for pytest
+    k8s_docs_root: Path = Path("/path/to/k8s/docs")  # K8s docs for idea agent
+    unsuccessful_root: Path = Path("/path/to/unsuccessful")  # Failed tasks
+```
+
+- **`game_name`** — Change this to generate tasks under a different game folder (e.g., `"game03"`)
+- **`tests_root`** — Root directory where game folders live
+- **`k8s_docs_root`** — Local copy of Kubernetes docs, read by the Idea Agent via MCP
+- **`unsuccessful_root`** — Where failed tasks are moved after all retries are exhausted
+
+### Workflow Tuning
+
+In `workflow/runner.py` you can adjust how many tasks are generated per run and how many fix attempts each task gets:
+
+```python
+# workflow/runner.py
+num_iterations = 80   # Number of tasks to generate per run
+
+# workflow/models.py (passed via InitialWorkflowState)
+max_retries = 3       # Fix attempts per task before giving up
 ```
 
 ## Usage
 
-### Running the Agents
-
-The project includes several AI agents for different purposes:
+### Running the Workflow
 
 ```bash
-# Activate virtual environment
 source .venv/bin/activate
 
-# Option 1: Launch DevUI (Interactive UI with full workflow)
-./launch_devui.sh
-# Opens browser to http://localhost:8081
-# Includes: Workflow + Generator + Validator + Pytest agents
-
-# Option 2: Run the workflow directly (generates 3 tasks with loop)
+# Run the full workflow (generates up to 80 tasks with retry loop)
 python workflow.py
 
-# Generate workflow visualization
-python visualize_workflow.py
-```# Run individual agents
+# Launch DevUI (interactive browser UI)
+./launch_devui.sh
+# Opens http://localhost:8081
+```
+
+### DevUI Sample Prompt
+
+When using DevUI, paste a prompt like this into the workflow input to generate a single task:
+
+```
+Generate a complete Kubernetes learning task with ID '050_secrets_management' about 'Kubernetes Secrets'.
+Difficulty: BEGINNER.
+Objective: Students will learn to create Secrets and mount them in Pods.
+Directory already created: /home/developer/Documents/data-disk/k8s/k8s-game-rule/tests/game02/050_secrets_management/
+Write all files directly into this directory.
+Create ALL required files including __init__.py, instruction.md, concept.md, session.json,
+setup.template.yaml, answer.template.yaml, and all test files.
+```
+
+Adjust the task ID, topic, difficulty, and directory path to match your setup. The workflow will generate the files, validate them, run tests, and retry with the Fixer Agent if anything fails.
+
+### Running Individual Agents
+
+```bash
+source .venv/bin/activate
+
 python -m agents.filesystem_agent
 python -m agents.k8s_task_generator_agent
 python -m agents.k8s_task_idea_agent
+python -m agents.kubernetes_agent
+python -m agents.k8s_task_validator
+python -m agents.pytest_runner
 ```
+
+## Architecture
 
 ### Agent Overview
 
-The project includes several specialized AI agents that work together:
+| Agent | Uses LLM | Purpose |
+|-------|----------|---------|
+| **K8s Task Idea Agent** | Yes | Generates unique K8s concepts with 3 difficulty variations. Uses structured outputs or tool-call approach depending on model. |
+| **K8s Task Generator Agent** | Yes | Creates complete task scaffolding (templates, tests, docs) via MCP filesystem. |
+| **K8s Task Fixer Agent** | Yes | Reads failed tasks, analyzes errors, and makes targeted fixes to broken files only. |
+| **Responses Agent** | Yes | Custom agent for codex models that only support the Responses API (not Chat Completions). |
+| **K8s Task Validator** | No | Pure Python validation — checks file structure, YAML/Python/JSON syntax, Jinja templates. |
+| **PyTest Runner** | No | Pure Python — runs `pytest` via subprocess and parses exit codes. |
+| **Filesystem Agent** | Yes | General-purpose file operations via MCP filesystem server. |
+| **Kubernetes Agent** | Yes | Executes `kubectl` commands against a K8s cluster. |
 
-1. **K8s Task Idea Agent** - Generates unique Kubernetes concepts with progressive difficulty (Beginner/Intermediate/Advanced)
-2. **K8s Task Generator Agent** - Creates complete task scaffolding with templates, tests, and validation
-3. **K8s Task Validator** - Pure Python validation (NO LLM) - validates task structure, YAML syntax, Python syntax, and Jinja templates
-4. **PyTest Runner** - Pure Python test execution (NO LLM) - runs and validates test suites
-5. **Filesystem Agent** - Handles file operations via MCP filesystem server
-6. **Kubernetes Agent** - Executes kubectl commands against K8s clusters
+### Workflow
 
-**Note**: Validator and PyTest Runner don't use LLM - they're pure Python functions for faster, more reliable, and cost-effective validation and testing.
+The main workflow (`workflow.py` → `workflow/runner.py`) runs 80 iterations by default, each generating one task:
 
-### Workflows
+```
+Idea Agent → Generate concept with 3 variations
+                ↓
+         Generator Agent → Create all task files via MCP
+                ↓
+         Parse Task ID
+                ↓
+         Validate (pure Python) → Check files, YAML, Python, JSON, Jinja
+                ↓
+         Run Pytest (pure Python) → Execute test suite
+                ↓
+         Decision: Pass or Fail?
+           ├─ Pass → Skip-Answer Test → Complete ✅
+           └─ Fail → Check retry count
+                       ├─ Retries left → Fixer Agent → Re-validate (loop)
+                       └─ Max retries  → Move to unsuccessful/ ❌
+```
 
-The project supports multiple execution modes:
+Each iteration:
+1. Resets minikube (delete + start)
+2. Generates a unique concept via the Idea Agent
+3. Runs the workflow with up to 3 fix attempts per task
+4. Tracks success/failure in memory files
 
-1. **main.py** - Sequential pipeline (idea → generate → test)
-2. **workflow.py** - Conditional workflow with validation (single task)
-3. **workflow_loop.py** - Workflow loop for multiple tasks with statistics
+### Key Design Decisions
 
-See [WORKFLOW.md](WORKFLOW.md) for detailed workflow documentation including:
-- Workflow architecture and visualization
-- Conditional logic and decision making
-- Structured output models
-- Executor naming conventions
+**Fix instead of regenerate**: On failure, the Fixer Agent reads the existing files, analyzes the specific errors (validation failures, test output), and patches only the broken files. This preserves working code and has a higher success rate than regenerating from scratch.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed technical documentation on agent logic, workflows, and system design.
+**No LLM for validation/testing**: Validation and test execution are deterministic operations. Using pure Python functions is faster, cheaper, and more reliable than routing through an LLM.
+
+**Skip-answer validation**: After tests pass, an extra step runs pytest with `SKIP_ANSWER_TESTS=True` to confirm that `test_05_check.py` correctly fails when the answer isn't deployed. This catches tests that would pass regardless of the student's answer.
+
+**Dual API support**: The `AzureOpenAI` config detects codex models and automatically uses the Responses API. Other models use Chat Completions. The `ResponsesAgent` class handles the Responses API tool-call loop manually.
 
 ## Project Structure
 
 ```
 k8s-game-rule-builder/
-├── .venv/                  # Virtual environment (created by setup.sh)
-├── agents/                 # AI agent modules
-│   ├── __init__.py
+├── agents/
+│   ├── config.py                   # Centralized paths, Azure, validation config
 │   ├── filesystem_agent.py         # MCP filesystem operations
-│   ├── k8s_task_generator_agent.py # Task generation
+│   ├── k8s_task_generator_agent.py # Task generation (LLM + MCP)
+│   ├── k8s_task_fixer_agent.py     # Targeted task fixing (LLM + MCP)
 │   ├── k8s_task_idea_agent.py      # Idea generation with memory
-│   ├── k8s_task_validator.py       # Task validation (no LLM)
-│   ├── kubernetes_agent.py         # K8s cluster interaction
-│   ├── pytest_runner.py            # Test execution (no LLM)
-│   └── logging_middleware.py       # Agent logging
-├── entities/               # DevUI entities (agents & workflows)
-│   ├── .env               # Shared environment variables
-│   ├── k8s_task_workflow/ # Complete workflow
-│   ├── k8s_generator_agent/
-│   ├── k8s_validator_agent/
-│   └── k8s_pytest_agent/
-├── docs/                   # Documentation
-│   └── ARCHITECTURE.md    # Technical architecture & design
-├── main.py                # Main entry point (sequential)
-├── workflow.py            # Workflow entry point (conditional)
-├── visualize_workflow.py  # Workflow visualization
-├── setup.sh               # Setup script
-├── requirements.txt       # Python dependencies
-├── README.md              # This file
-└── WORKFLOW.md            # Workflow documentation
+│   ├── k8s_task_validator.py       # Pure Python validator (no LLM)
+│   ├── kubernetes_agent.py         # kubectl command execution
+│   ├── pytest_runner.py            # Pure Python test runner (no LLM)
+│   ├── responses_agent.py          # Custom Responses API agent for codex models
+│   └── logging_middleware.py       # Function invocation logging
+├── workflow/
+│   ├── builder.py                  # Workflow graph construction
+│   ├── executors.py                # Step implementations (12 executors)
+│   ├── models.py                   # Data models (Pydantic + dataclasses)
+│   ├── selectors.py                # Conditional routing functions
+│   ├── runner.py                   # Main runner (multi-iteration loop)
+│   ├── idea_generator.py           # Idea generation logic
+│   └── README.md                   # Workflow package docs
+├── docs/
+│   ├── ARCHITECTURE.md             # Technical architecture & design
+│   ├── FIX_WORKFLOW.md             # Fix-on-failure workflow details
+│   └── RETRY_LOGIC.md             # Retry implementation guide
+├── workflow.py                     # Entry point (delegates to workflow/runner.py)
+├── launch_devui.sh                 # Launch DevUI script
+├── launch_devui_full.py            # DevUI setup with full workflow
+├── setup.sh                        # Environment setup
+├── requirements.txt                # Python dependencies
+├── task_ideas_memory.json          # Generated concepts memory
+├── task_ideas_failure_memory.json  # Failed concepts memory
+├── workflow_graph.png              # Workflow visualization
+├── CHANGELOG.md                    # Version history
+└── README.md                       # This file
 ```
 
-## Quick Start
+## Generated Task Structure
 
-1. **Setup environment:**
-   ```bash
-   bash setup.sh
-   ```
+Each task is generated under `tests/<game_name>/<task_id>/`:
 
-2. **Run the sequential pipeline:**
-   ```bash
-   source .venv/bin/activate
-   python main.py
-   ```
+| File | Description |
+|------|-------------|
+| `__init__.py` | Empty (package marker) |
+| `instruction.md` | Student-facing challenge description |
+| `concept.md` | Learning material (no solution code) |
+| `session.json` | Template variables (plain JSON) |
+| `setup.template.yaml` | Namespace + prerequisites (Jinja2) |
+| `answer.template.yaml` | Complete solution (Jinja2) |
+| `test_01_setup.py` | Deploy setup resources |
+| `test_02_ready.py` | Wait for setup resources to be ready |
+| `test_03_answer.py` | Deploy answer resources |
+| `test_04_challenge.py` | Optional — triggers/load generation |
+| `test_05_check.py` | Validate the solution |
+| `test_06_cleanup.py` | Delete namespace |
 
-3. **Run the conditional workflow (single task):**
-   ```bash
-   source .venv/bin/activate
-   python workflow.py
-   ```
+## Memory System
 
-4. **Run the workflow loop (multiple tasks):**
-   ```bash
-   source .venv/bin/activate
-   python workflow_loop.py
-   ```
+The project uses two JSON files for cross-session memory:
 
-5. **Launch DevUI (Interactive UI):**
-   ```bash
-   source .venv/bin/activate
-   devui entities
-   # Open browser to http://localhost:8000
-   ```
+- **`task_ideas_memory.json`** — Successfully generated concepts (prevents re-generation)
+- **`task_ideas_failure_memory.json`** — Concepts that failed validation/testing (prevents retrying known failures)
 
-6. **Generate workflow visualization:**
-   ```bash
-   source .venv/bin/activate
-   python visualize_workflow.py
-   # Creates: workflow_graph.svg, workflow_graph.png, workflow_graph.pdf
-   ```
+Memory is injected into the Idea Agent via `TaskIdeasMemoryMiddleware` (Chat Completions) or prepended to instructions (Responses API).
 
-7. **Generate task ideas:**
-   ```bash
-   python -m agents.k8s_task_idea_agent
-   ```
+## MCP Integration
+
+Agents interact with the filesystem through the official [@modelcontextprotocol/server-filesystem](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) package:
+
+```python
+mcp_tool = MCPStdioTool(
+    name="filesystem",
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", str(allowed_directory)],
+    load_prompts=False,
+)
+```
+
+- Launched via `npx` (no manual installation)
+- Sandboxed to specified directories
+- Supports read/write files, directory operations, search
+- Lazy connection — connects on first use in DevUI
 
 ## Documentation
 
-- **README.md** (this file) - Quick start and overview
-- **[WORKFLOW.md](WORKFLOW.md)** - Workflow architecture:
-  - Retry-based workflow implementation
-  - Conditional workflow architecture
-  - Workflow visualization (Mermaid, SVG, PNG, PDF)
-  - Structured output models
-  - Executor naming conventions
-- **[CHANGELOG.md](CHANGELOG.md)** - Version history:
-  - Recent changes and improvements
-  - Migration guides
-  - Breaking changes
-- **[docs/RETRY_LOGIC.md](docs/RETRY_LOGIC.md)** - Retry implementation:
-  - How retry logic works
-  - Configuration and best practices
-  - Troubleshooting guide
-  - Example scenarios
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Technical documentation:
-  - Agent architecture and workflows
-  - Template system and validation patterns
-  - MCP integration details
-  - Memory management
+- [CHANGELOG.md](CHANGELOG.md) — Version history and migration guides
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Agent architecture, validation patterns, MCP details
+- [docs/FIX_WORKFLOW.md](docs/FIX_WORKFLOW.md) — Fix-on-failure workflow architecture
+- [docs/RETRY_LOGIC.md](docs/RETRY_LOGIC.md) — Retry configuration, troubleshooting, best practices
+- [workflow/README.md](workflow/README.md) — Workflow package structure and components
 
 ## Requirements
 
 - Python 3.x
-- Azure OpenAI API access
-- Node.js (for npx to run MCP server)
-- kubectl (for Kubernetes interaction)
+- Azure OpenAI API access (with Azure CLI credential)
+- Node.js (for `npx` to run MCP server)
+- kubectl + minikube (for Kubernetes interaction and testing)
 - DevUI (optional): `pip install agent-framework[devui]`
-
-## License
-
-See LICENSE file for details.
-
-## MCP Integration
-
-This project uses the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to enable AI agents to interact with external tools:
-
-- **MCP Filesystem Server**: Official [@modelcontextprotocol/server-filesystem](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) package
-- **Automatic Execution**: Launched via `npx` when agents start (no manual installation required)
-- **Sandboxed Access**: File operations restricted to specified directories for security
-- **Rich Capabilities**: Supports read/write files, directory operations, search, and more
-
-### How It Works
-
-1. Agents use `MCPStdioTool` to connect to the MCP server via stdio
-2. The server is launched with `npx -y @modelcontextprotocol/server-filesystem [allowed_directories]`
-3. Agents can then call filesystem tools within the allowed directories
-4. Server automatically shuts down when the agent context closes
-
-## Dependencies
-
-See [requirements.txt](requirements.txt) for the full list of dependencies.

@@ -30,7 +30,7 @@ class Paths:
 @dataclass(frozen=True)
 class AzureOpenAI:
     endpoint: str = "https://cyrus-me23xi26-eastus2.openai.azure.com/"
-    deployment_name: str = "gpt-5.2-chat"
+    deployment_name: str = "gpt-5.3-codex"
 
     # Models that require the Responses API (no Chat Completions support).
     # Add model prefixes here as needed.

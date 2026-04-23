@@ -1,7 +1,8 @@
 """Launch DevUI with the FULL workflow including generator agent and retry loop.
 
-This script creates the workflow programmatically and keeps the MCP context alive
-for the entire DevUI session to support the workflow retry loop.
+This script creates the workflow programmatically and registers entities with
+DevUI. MCP tools use lazy initialization and connect automatically on first use
+inside the DevUI event loop — do NOT use ``async with`` or ``__aenter__`` here.
 
 The workflow generates 1 successful task with automatic retry on failure (up to 3 attempts).
 """
@@ -14,6 +15,7 @@ from agents.config import PATHS
 
 # Import executors from workflow
 from workflow import (
+    initialize_retry,
     parse_generated_task,
     run_validation,
     run_pytest,
@@ -28,40 +30,36 @@ from workflow import (
 )
 
 
-# Global to keep MCP tool alive
-mcp_tool = None
-
-
 async def create_entities():
-    """Create all entities including the full workflow."""
-    global mcp_tool
-    
+    """Create all entities including the full workflow.
+
+    MCP tools connect lazily on first use — no ``async with`` needed here.
+    See: https://learn.microsoft.com/agent-framework/devui/security#best-practices
+    """
     print("Creating full workflow with generator agent and loop...")
-    
-    # Create MCP tool - keep it alive globally
+
+    # Create MCP tool — do NOT enter async context; DevUI handles lifecycle
     mcp_tool = MCPStdioTool(
         name="filesystem",
         command="npx",
         args=[
             "-y",
             "@modelcontextprotocol/server-filesystem",
-            str(PATHS.tests_root)
+            str(PATHS.tests_root),
         ],
-        load_prompts=False
+        load_prompts=False,
     )
-    
-    # Start the MCP tool
-    await mcp_tool.__aenter__()
-    
-    # Create generator agent with persistent MCP tool (reuses agent creation logic)
+
+    # Create generator agent (MCP tool is passed by reference, connected lazily)
     gen_agent = await create_generator_agent_with_mcp(mcp_tool)
     generator_executor = AgentExecutor(gen_agent, id="generator_agent")
-    
-    # Build workflow with conditional logic and retry loop
-    # Note: Validation and pytest are now direct executors (no LLM needed)
+
+    # Build workflow matching the structure in workflow/builder.py.
+    # initialize_retry is the start executor — it wraps raw input into a
+    # proper AgentExecutorRequest before forwarding to the generator agent.
     workflow = (
-        WorkflowBuilder()
-        .set_start_executor(generator_executor)
+        WorkflowBuilder(start_executor=initialize_retry)
+        .add_edge(initialize_retry, generator_executor)
         .add_edge(generator_executor, parse_generated_task)
         .add_edge(parse_generated_task, run_validation)
         .add_edge(run_validation, run_pytest)
@@ -83,8 +81,7 @@ async def create_entities():
         .add_edge(retry_generation, generator_executor)
         .build()
     )
-    
-    # Return workflow and all individual agents
+
     return [workflow, gen_agent]
 
 
@@ -101,27 +98,20 @@ def main():
     print("  - Topic-focused generation")
     print("  - Two decision points (keep/remove, retry/complete)")
     print("  - Shared state management")
-    print("  - MCP tool stays alive for entire session")
+    print("  - MCP tool connects lazily on first agent run")
     print("\n🌐 Opening browser to http://localhost:8081")
-    
-    # Create entities synchronously
+
+    # Create entities — MCP tool is constructed but not connected yet
     entities = asyncio.run(create_entities())
-    
+
     print(f"\n✅ Registered {len(entities)} entities")
-    print("✅ MCP filesystem tool is active and will remain alive")
-    
-    try:
-        # Launch DevUI with the full workflow and all agents
-        serve(
-            entities=entities,
-            port=8081,
-            auto_open=True
-        )
-    finally:
-        # Clean up MCP tool when DevUI shuts down
-        if mcp_tool:
-            print("\n🧹 Cleaning up MCP tool...")
-            asyncio.run(mcp_tool.__aexit__(None, None, None))
+
+    # Launch DevUI — MCP tool will connect automatically when the agent runs
+    serve(
+        entities=entities,
+        port=8081,
+        auto_open=True,
+    )
 
 
 if __name__ == "__main__":

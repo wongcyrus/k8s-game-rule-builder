@@ -26,9 +26,23 @@ _MISSING = object()  # sentinel for get_state fallback detection
 
 
 @executor(id="initialize_retry")
-async def initialize_retry(message: str | AgentExecutorRequest | InitialWorkflowState, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
+async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialWorkflowState, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
     """Initialize or re-initialize shared state before generation."""
     logging.info("\n[STEP] Initializing/Re-initializing workflow state...")
+    
+    # DevUI sends structured input as a raw dict — convert to InitialWorkflowState
+    if isinstance(message, dict):
+        # DevUI may wrap input as {"input": "..."} (plain text) or as a full dict
+        if "input" in message and isinstance(message["input"], str):
+            # Plain text wrapped by DevUI — treat as a string prompt
+            message = message["input"]
+        elif "prompt" in message:
+            # Structured data matching InitialWorkflowState fields
+            message = InitialWorkflowState(**message)
+        else:
+            # Unknown dict shape — use str representation as prompt
+            import json
+            message = json.dumps(message)
     
     if isinstance(message, InitialWorkflowState):
         logging.info("First run - initializing shared state from InitialWorkflowState")
@@ -53,13 +67,36 @@ async def initialize_retry(message: str | AgentExecutorRequest | InitialWorkflow
     else:
         task_id = ctx.get_state("task_id", _MISSING)
         target_topic = ctx.get_state("target_topic", _MISSING)
-        if task_id is _MISSING or target_topic is _MISSING:
-            raise KeyError(f"Missing required shared state: task_id={task_id}, target_topic={target_topic}")
-        logging.info(f"Retry: State found: task_id={task_id}, topic={target_topic}")
         
-        # Ensure directory exists on retries too
-        task_dir = PATHS.game_root / task_id
-        task_dir.mkdir(parents=True, exist_ok=True)
+        if task_id is _MISSING or target_topic is _MISSING:
+            # First run from DevUI with plain text — try to extract task info
+            # from the prompt and initialize state so the workflow can proceed.
+            prompt_text = message if isinstance(message, str) else ""
+            
+            # Try to extract task_id from prompt (e.g. '050_secrets_management')
+            id_match = re.search(r"(\d{3}_[a-z0-9_]+)", prompt_text)
+            parsed_task_id = id_match.group(1) if id_match else "050_unknown_task"
+            
+            # Try to extract topic from "about 'X'" pattern
+            topic_match = re.search(r"about\s+['\"]([^'\"]+)['\"]", prompt_text)
+            parsed_topic = topic_match.group(1) if topic_match else "Kubernetes"
+            
+            ctx.set_state("task_id", parsed_task_id)
+            ctx.set_state("target_topic", parsed_topic)
+            ctx.set_state("concept_description", parsed_topic)
+            ctx.set_state("difficulty", "BEGINNER")
+            ctx.set_state("objective", parsed_topic)
+            ctx.set_state("retry_count", 0)
+            ctx.set_state("max_retries", 3)
+            
+            task_dir = PATHS.game_root / parsed_task_id
+            task_dir.mkdir(parents=True, exist_ok=True)
+            logging.info(f"DevUI first run - parsed task_id={parsed_task_id}, topic={parsed_topic}")
+            logging.info(f"Pre-created task directory: {task_dir}")
+        else:
+            logging.info(f"Retry: State found: task_id={task_id}, topic={target_topic}")
+            task_dir = PATHS.game_root / task_id
+            task_dir.mkdir(parents=True, exist_ok=True)
         
         if isinstance(message, str):
             request = AgentExecutorRequest(
