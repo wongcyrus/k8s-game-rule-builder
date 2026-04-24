@@ -55,7 +55,7 @@ The project authenticates via **Azure CLI credentials** — no API keys in code 
    @dataclass(frozen=True)
    class AzureOpenAI:
        endpoint: str = "https://your-resource-name.openai.azure.com/"
-       deployment_name: str = "gpt-4o"  # Your deployment name
+       deployment_name: str = "gpt-5.3-codex"  # Your deployment name
    ```
 
 That's it. All agents pick up the endpoint and model from this single config.
@@ -68,7 +68,7 @@ To switch models, change `deployment_name` in `agents/config.py`:
 @dataclass(frozen=True)
 class AzureOpenAI:
     endpoint: str = "https://your-resource-name.openai.azure.com/"
-    deployment_name: str = "gpt-4o"  # ← change this
+    deployment_name: str = "gpt-5.3-codex"  # ← change this
 ```
 
 The project automatically selects the right API based on the model:
@@ -186,22 +186,17 @@ python -m agents.pytest_runner
 
 The main workflow (`workflow.py` → `workflow/runner.py`) runs 80 iterations by default, each generating one task:
 
-```
-Idea Agent → Generate concept with 3 variations
-                ↓
-         Generator Agent → Create all task files via MCP
-                ↓
-         Parse Task ID
-                ↓
-         Validate (pure Python) → Check files, YAML, Python, JSON, Jinja
-                ↓
-         Run Pytest (pure Python) → Execute test suite
-                ↓
-         Decision: Pass or Fail?
-           ├─ Pass → Skip-Answer Test → Complete ✅
-           └─ Fail → Check retry count
-                       ├─ Retries left → Fixer Agent → Re-validate (loop)
-                       └─ Max retries  → Move to unsuccessful/ ❌
+```mermaid
+flowchart TD
+    IDEA[🧠 Idea Agent] --> GEN[⚙️ Generator Agent]
+    GEN --> VAL[✅ Validate + Test]
+    VAL --> DEC{Pass?}
+    DEC -->|Yes| SKIP[🧪 Skip-Answer Test]
+    SKIP -->|Pass| DONE([✅ Complete])
+    SKIP -->|Fail| LOOP
+    DEC -->|No| LOOP{Retry?}
+    LOOP -->|Yes| FIX[🔧 Fixer Agent] --> VAL
+    LOOP -->|No| FAIL([❌ Move to unsuccessful/])
 ```
 
 Each iteration:
@@ -244,9 +239,7 @@ k8s-game-rule-builder/
 │   ├── idea_generator.py           # Idea generation logic
 │   └── README.md                   # Workflow package docs
 ├── docs/
-│   ├── ARCHITECTURE.md             # Technical architecture & design
-│   ├── FIX_WORKFLOW.md             # Fix-on-failure workflow details
-│   └── RETRY_LOGIC.md             # Retry implementation guide
+│   └── ARCHITECTURE.md             # Technical architecture & design
 ├── workflow.py                     # Entry point (delegates to workflow/runner.py)
 ├── launch_devui.sh                 # Launch DevUI script
 ├── launch_devui_full.py            # DevUI setup with full workflow
@@ -308,9 +301,7 @@ mcp_tool = MCPStdioTool(
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) — Version history and migration guides
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Agent architecture, validation patterns, MCP details
-- [docs/FIX_WORKFLOW.md](docs/FIX_WORKFLOW.md) — Fix-on-failure workflow architecture
-- [docs/RETRY_LOGIC.md](docs/RETRY_LOGIC.md) — Retry configuration, troubleshooting, best practices
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — Agents, workflow, retry logic, MCP integration
 - [workflow/README.md](workflow/README.md) — Workflow package structure and components
 
 ## Requirements
