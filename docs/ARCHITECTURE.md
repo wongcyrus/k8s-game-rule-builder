@@ -143,7 +143,8 @@ flowchart LR
 | Model type | API | Client |
 |-----------|-----|--------|
 | Standard (gpt-4o, etc.) | Chat Completions | `OpenAIChatCompletionClient` |
-| Codex (gpt-5.3-codex, etc.) | Responses API | `OpenAIChatClient` or custom `ResponsesAgent` |
+| Standard (gpt-5.6-terra, gpt-5.6-luna, gpt-5.6-sol, etc.) | Chat Completions | `OpenAIChatCompletionClient` |
+| Codex models (for example, `gpt-5.x-codex`, `gpt-5-pro`) | Responses API | `OpenAIChatClient` or custom `ResponsesAgent` |
 
 Detection is automatic via `AzureOpenAI.use_responses_api` in `agents/config.py`.
 

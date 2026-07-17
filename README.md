@@ -54,7 +54,7 @@ The project authenticates via **Azure CLI credentials** — no API keys in code 
 3. Set required environment variables in `.env` at the repository root (auto-loaded), for example:
    ```bash
    AZURE_OPENAI_ENDPOINT="https://your-resource-name.openai.azure.com/"
-   AZURE_OPENAI_DEPLOYMENT_NAME="gpt-5.3-codex"
+   AZURE_OPENAI_DEPLOYMENT_NAME="gpt-5.6-terra"
    ```
 
 ### Changing the Model
@@ -69,14 +69,14 @@ The project automatically selects the right API based on the model:
 
 | Model | API Used | How It Works |
 |-------|----------|--------------|
-| `gpt-4o`, `gpt-4`, `gpt-4o-mini`, etc. | Chat Completions | Standard `OpenAIChatCompletionClient` from agent-framework |
-| `gpt-5.3-codex`, `gpt-5-pro`, `gpt-5.1-codex-max`, etc. | Responses API | Custom `ResponsesAgent` with manual tool-call loop |
+| `gpt-4o`, `gpt-4`, `gpt-4o-mini`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.6-sol`, etc. | Chat Completions | Standard `OpenAIChatCompletionClient` from agent-framework |
+| Codex models (for example, `gpt-5.x-codex`, `gpt-5-pro`) | Responses API | Custom `ResponsesAgent` with manual tool-call loop |
 
 Detection is based on model prefix matching in `AzureOpenAI.RESPONSES_ONLY_PREFIXES`. If you deploy a new codex/responses-only model, add its prefix there:
 
 ```python
 RESPONSES_ONLY_PREFIXES: tuple[str, ...] = (
-    "gpt-5.3-codex",
+    "gpt-5.x-codex",
     "gpt-5.2-codex",
     "gpt-5.1-codex",
     "gpt-5-codex",
