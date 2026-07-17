@@ -173,6 +173,9 @@ MCP tools connect lazily on first use.
 
 Each task lives under `tests/<game_name>/<task_id>/`:
 
+> Note: This `tests/...` location refers to the external K8s game repo path from `PATHS.tests_root`, not this builder repo.  
+> This builder repo keeps its own unit tests under `unit_tests/`.
+
 | File | Required | Description |
 |------|----------|-------------|
 | `__init__.py` | Yes | Empty package marker |
@@ -212,6 +215,8 @@ k8s-game-rule-builder/
 │   └── idea_generator.py           # Idea generation logic
 ├── docs/
 │   └── ARCHITECTURE.md             # This file
+├── unit_tests/                     # Unit tests for this builder project
+├── pytest.ini                      # Pytest config (collect from unit_tests/)
 ├── workflow.py                     # Entry point
 ├── launch_devui.sh                 # DevUI launcher
 ├── launch_devui_full.py            # DevUI setup with full workflow

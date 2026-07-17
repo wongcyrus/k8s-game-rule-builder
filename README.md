@@ -136,6 +136,9 @@ python workflow.py
 # Launch DevUI (interactive browser UI)
 ./launch_devui.sh
 # Opens http://localhost:8081
+
+# Run builder unit tests (collected from unit_tests/ via pytest.ini)
+pytest
 ```
 
 ### DevUI Sample Prompt
@@ -240,6 +243,8 @@ k8s-game-rule-builder/
 │   └── README.md                   # Workflow package docs
 ├── docs/
 │   └── ARCHITECTURE.md             # Technical architecture & design
+├── unit_tests/                     # Unit tests for this builder project
+├── pytest.ini                      # Pytest config (collect from unit_tests/)
 ├── workflow.py                     # Entry point (delegates to workflow/runner.py)
 ├── launch_devui.sh                 # Launch DevUI script
 ├── launch_devui_full.py            # DevUI setup with full workflow
@@ -255,6 +260,9 @@ k8s-game-rule-builder/
 ## Generated Task Structure
 
 Each task is generated under `tests/<game_name>/<task_id>/`:
+
+> Note: This `tests/...` path is in the external game repository configured by `PATHS.tests_root`, not in this builder repository.  
+> Builder unit tests live in `unit_tests/`.
 
 | File | Description |
 |------|-------------|

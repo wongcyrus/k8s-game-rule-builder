@@ -14,8 +14,8 @@ workflow/
 ├── runner.py            # Main workflow runner
 └── README.md            # This file
 
-agents/
-└── idea_generator.py    # Task idea generation logic (moved from workflow/)
+unit_tests/
+└── test_workflow_*.py   # Builder workflow unit tests
 ```
 
 ## Components
@@ -36,16 +36,18 @@ Contains all workflow executors (steps):
 - `run_validation`: Run validation checks
 - `run_pytest`: Run pytest tests
 - `make_decision`: Make keep/remove decision
-- `keep_task`: Keep successful task
-- `remove_task`: Move failed task to unsuccessful folder
-- `check_loop`: Check if should retry
-- `retry_generation`: Retry task generation
-- `complete_workflow`: Complete workflow
+- `keep_task`: Keep successful task and continue to skip-answer validation
+- `remove_task`: Record failure and increment retry count
+- `run_pytest_skip_answer`: Validate `test_05_check.py` fails when answer is skipped
+- `check_loop`: Check if should retry with fixer or complete
+- `fix_task`: Build targeted fix prompt with failure context
+- `complete_workflow`: Complete workflow or move to unsuccessful folder after max retries
 
 ### selectors.py
 Contains selection functions for conditional routing:
 - `select_action`: Choose between keep_task and remove_task
-- `select_loop_action`: Choose between retry_generation and complete_workflow
+- `select_skip_answer_action`: Choose between check_loop and complete_workflow
+- `select_loop_action`: Choose between fix_task and complete_workflow
 
 ### builder.py
 Contains the workflow builder:
@@ -58,8 +60,8 @@ Contains the main workflow runner:
 
 ## Related Components
 
-### agents/idea_generator.py
-Contains task idea generation logic (moved from workflow/):
+### workflow/idea_generator.py
+Contains task idea generation logic:
 - `generate_task_idea`: Generate unique task ideas using the idea agent
 
 ## Workflow Flow
@@ -79,11 +81,11 @@ make_decision
     ↓
 [keep_task OR remove_task]
     ↓
-check_loop
+[run_pytest_skip_answer OR check_loop]
     ↓
-[retry_generation OR complete_workflow]
+[fix_task OR complete_workflow]
     ↓
-(retry loops back to initialize_retry)
+(fix_task routes to fixer_agent, then back to parse_generated_task)
 ```
 
 ## Usage
@@ -92,6 +94,12 @@ Run the workflow from the project root:
 
 ```bash
 python workflow.py
+```
+
+Run builder unit tests:
+
+```bash
+pytest
 ```
 
 Or import and use programmatically:
@@ -111,3 +119,4 @@ asyncio.run(run_workflow())
 - **Conditional Routing**: Uses selection functions for dynamic workflow paths
 - **State Management**: Uses shared state to pass data between executors
 - **Failure Tracking**: Moves failed tasks to unsuccessful folder with detailed reports
+- **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True`
