@@ -205,8 +205,10 @@ def get_k8s_task_validator():
             if match:
                 task_dir = match.group(1)
             else:
-                # Fallback: assume the prompt contains the task directory
-                task_dir = prompt.strip()
+                raise ValueError(
+                    "Could not extract task directory from prompt. "
+                    "Expected task ID like '050_example_task' or tests/<game>/<task_id>."
+                )
             
             logging.info(f"Validating task directory: {task_dir}")
             result = validate_task_directory(task_dir)

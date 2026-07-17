@@ -2,17 +2,16 @@
 import asyncio
 import logging
 import importlib
+import argparse
 import sys
+from dataclasses import dataclass
 
 from agent_framework import (
     MCPStdioTool,
-    WorkflowEvent,
     WorkflowViz,
 )
-from agent_framework.openai import OpenAIChatClient
-from azure.identity import AzureCliCredential
 
-from agents.config import PATHS, AZURE
+from agents.config import PATHS
 from agents.k8s_task_idea_agent import create_idea_agent_with_mcp
 from workflow.idea_generator import generate_task_idea
 from workflow.builder import build_workflow
@@ -29,16 +28,52 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("agent_framework").setLevel(logging.WARNING)
 
 
-def reset_minikube(iteration):
+@dataclass(frozen=True)
+class WorkflowRuntimeConfig:
+    iterations: int = 80
+    reset_minikube: bool = True
+    minikube_delete_timeout: int = 120
+    minikube_start_timeout: int = 300
+    max_retries: int = 3
+    save_workflow_graph: bool = True
+
+
+def _build_task_prompt(*, task_id: str, target_topic: str, concept, beginner_task, existing_tasks: list[str], existing_concepts: list[str]) -> str:
+    return (
+        f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
+        f"\n\nTask Details:"
+        f"\n- Concept: {concept.concept}"
+        f"\n- Description: {concept.description}"
+        f"\n- Difficulty: {beginner_task.difficulty}"
+        f"\n- Objective: {beginner_task.objective}"
+        f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
+        f"\n\nPREVIOUSLY COVERED CONCEPTS (this is a new concept): {', '.join(existing_concepts) if existing_concepts else 'None'}"
+        f"\n\n✅ Directory already created: {PATHS.game_root}/{task_id}/"
+        f"\nWrite all files directly into this directory. Do NOT call create_directory."
+        f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
+        f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
+        f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+        f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
+        f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
+        f"Use proper Jinja template variables and follow all established patterns. "
+        f"Make sure all files are syntactically correct and tests will pass."
+    )
+
+
+def reset_minikube(iteration: int, config: WorkflowRuntimeConfig):
     # Clean up minikube before each iteration
     import subprocess
+    if not config.reset_minikube:
+        logging.info(f"[ITERATION {iteration + 1}] Skipping minikube reset (config)")
+        return
+
     try:
         logging.info(f"[ITERATION {iteration + 1}] Cleaning up minikube...")
         result = subprocess.run(
             ["minikube", "delete"],
             capture_output=True,
             text=True,
-            timeout=120
+            timeout=config.minikube_delete_timeout
         )
         if result.returncode == 0:
             logging.info("Minikube cleanup completed successfully")
@@ -52,7 +87,7 @@ def reset_minikube(iteration):
             ["minikube", "start", "--driver=docker", "--listen-address=127.0.0.1", "--apiserver-names=localhost", "--ports=127.0.0.1:8443:8443"],
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=config.minikube_start_timeout
         )
         if start_result.returncode == 0:
             logging.info("Minikube started successfully")
@@ -68,8 +103,9 @@ def reset_minikube(iteration):
         logging.error(f"Error during minikube operation: {e}")
 
 
-async def run_workflow():
+async def run_workflow(config: WorkflowRuntimeConfig | None = None):
     """Run the complete K8s task generation workflow."""
+    config = config or WorkflowRuntimeConfig()
     # Force reload to pick up code changes
     if 'agents.pytest_runner' in sys.modules:
         importlib.reload(sys.modules['agents.pytest_runner'])
@@ -95,18 +131,18 @@ async def run_workflow():
     )
     
     async with docs_mcp_tool, tests_mcp_tool:
-        num_iterations = 80  # You can adjust this number
+        num_iterations = config.iterations
 
         for iteration in range(num_iterations):
             logging.info(f"\n[ITERATION {iteration + 1}/{num_iterations}] Starting task generation...")
-            reset_minikube(iteration)
+            reset_minikube(iteration, config)
 
             # Create a new agent and workflow for each iteration
             idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
             workflow, generator_executor, fixer_executor = await build_workflow(tests_mcp_tool)
 
             # Generate workflow visualization only on first iteration
-            if iteration == 0:
+            if iteration == 0 and config.save_workflow_graph:
                 viz = WorkflowViz(workflow)
                 try:
                     viz.save_png("workflow_graph.png")
@@ -122,18 +158,7 @@ async def run_workflow():
             task_id = beginner_task.task_id
 
             # Save concept immediately so restarts won't regenerate it
-            if hasattr(idea_memory, "add_structured_concept"):
-                idea_memory.add_structured_concept(concept)
-            else:
-                mem_key = concept.concept.replace(" ", "_").replace("*", "").lower()
-                idea_memory.generated_ideas[mem_key] = {
-                    "concept": concept.concept,
-                    "description": concept.description,
-                    "variations": [v.task_id for v in concept.variations],
-                    "difficulty": "Mixed",
-                    "tags": concept.tags,
-                }
-                idea_memory._save_ideas()
+            idea_memory.add_structured_concept(concept)
 
             # Step 2: Run workflow
             logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
@@ -149,24 +174,13 @@ async def run_workflow():
             if idea_memory.generated_ideas:
                 existing_concepts = [idea['concept'] for idea in idea_memory.generated_ideas.values()]
 
-            task_prompt = (
-                f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
-                f"\n\nTask Details:"
-                f"\n- Concept: {concept.concept}"
-                f"\n- Description: {concept.description}"
-                f"\n- Difficulty: {beginner_task.difficulty}"
-                f"\n- Objective: {beginner_task.objective}"
-                f"\n\nEXISTING TASKS (avoid these IDs): {', '.join(existing_tasks) if existing_tasks else 'None'}"
-                f"\n\nPREVIOUSLY COVERED CONCEPTS (this is a new concept): {', '.join(existing_concepts) if existing_concepts else 'None'}"
-                f"\n\n✅ Directory already created: {PATHS.game_root}/{task_id}/"
-                f"\nWrite all files directly into this directory. Do NOT call create_directory."
-                f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
-                f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
-                f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
-                f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
-                f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
-                f"Use proper Jinja template variables and follow all established patterns. "
-                f"Make sure all files are syntactically correct and tests will pass."
+            task_prompt = _build_task_prompt(
+                task_id=task_id,
+                target_topic=target_topic,
+                concept=concept,
+                beginner_task=beginner_task,
+                existing_tasks=existing_tasks,
+                existing_concepts=existing_concepts,
             )
 
             # Create initial state object
@@ -178,7 +192,7 @@ async def run_workflow():
                 difficulty=beginner_task.difficulty,
                 objective=beginner_task.objective,
                 retry_count=0,
-                max_retries=3
+                max_retries=config.max_retries
             )
 
             workflow_succeeded = False
@@ -195,18 +209,7 @@ async def run_workflow():
                 logging.info(f"💾 Task succeeded: {concept.concept}")
             else:
                 # Move from success memory to failure memory
-                if hasattr(idea_memory, "add_failed_concept"):
-                    idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
-                else:
-                    mem_key = concept.concept.replace(" ", "_").replace("*", "").lower()
-                    idea_memory.failed_concepts[mem_key] = {
-                        "concept": concept.concept,
-                        "description": concept.description,
-                        "variations": [v.task_id for v in concept.variations],
-                        "reason": "Workflow validation failed",
-                        "tags": concept.tags,
-                    }
-                    idea_memory._save_failures()
+                idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
                 logging.info(f"💾 Saved concept to failure memory: {concept.concept}")
 
             logging.info(f"\n[ITERATION {iteration + 1}] Complete")
@@ -218,7 +221,44 @@ async def run_workflow():
 
 def main():
     """Entry point for the workflow."""
-    asyncio.run(run_workflow())
+    parser = argparse.ArgumentParser(description="Run K8s task generation workflow.")
+    parser.add_argument("--iterations", type=int, default=80, help="Number of workflow iterations to run.")
+    parser.add_argument(
+        "--reset-minikube",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable or disable minikube reset between iterations.",
+    )
+    parser.add_argument(
+        "--minikube-delete-timeout",
+        type=int,
+        default=120,
+        help="Timeout seconds for 'minikube delete'.",
+    )
+    parser.add_argument(
+        "--minikube-start-timeout",
+        type=int,
+        default=300,
+        help="Timeout seconds for 'minikube start'.",
+    )
+    parser.add_argument("--max-retries", type=int, default=3, help="Fix attempts per task before giving up.")
+    parser.add_argument(
+        "--save-workflow-graph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable or disable writing workflow_graph.png on first iteration.",
+    )
+    args = parser.parse_args()
+
+    runtime_config = WorkflowRuntimeConfig(
+        iterations=args.iterations,
+        reset_minikube=args.reset_minikube,
+        minikube_delete_timeout=args.minikube_delete_timeout,
+        minikube_start_timeout=args.minikube_start_timeout,
+        max_retries=args.max_retries,
+        save_workflow_graph=args.save_workflow_graph,
+    )
+    asyncio.run(run_workflow(runtime_config))
 
 
 if __name__ == "__main__":

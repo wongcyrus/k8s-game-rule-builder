@@ -15,7 +15,7 @@ def test_reset_minikube_runs_delete_then_start(monkeypatch):
         return _ProcResult(returncode=0)
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    runner.reset_minikube(0)
+    runner.reset_minikube(0, runner.WorkflowRuntimeConfig())
 
     assert calls[0] == ["minikube", "delete"]
     assert calls[1][0:2] == ["minikube", "start"]
@@ -26,7 +26,7 @@ def test_reset_minikube_handles_missing_minikube(monkeypatch):
         raise FileNotFoundError("missing")
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    runner.reset_minikube(0)
+    runner.reset_minikube(0, runner.WorkflowRuntimeConfig())
 
 
 def test_reset_minikube_handles_timeout(monkeypatch):
@@ -36,7 +36,15 @@ def test_reset_minikube_handles_timeout(monkeypatch):
         raise subprocess.TimeoutExpired(cmd="minikube", timeout=1)
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    runner.reset_minikube(0)
+    runner.reset_minikube(0, runner.WorkflowRuntimeConfig())
+
+
+def test_reset_minikube_skip_mode(monkeypatch):
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args) or _ProcResult())
+    cfg = runner.WorkflowRuntimeConfig(reset_minikube=False)
+    runner.reset_minikube(0, cfg)
+    assert calls == []
 
 
 def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
@@ -59,9 +67,13 @@ def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
     class FakeMemory:
         def __init__(self):
             self.generated_ideas = {}
+            self.failed_concepts = {}
 
         def add_structured_concept(self, concept):
             self.generated_ideas["c"] = {"concept": concept.concept}
+
+        def add_failed_concept(self, concept, reason):
+            self.failed_concepts["c"] = {"concept": concept.concept, "reason": reason}
 
     class _Var:
         task_id = "050_demo"
@@ -87,7 +99,7 @@ def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
-    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration: None)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(
         runner,
@@ -105,7 +117,7 @@ def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
 
     import asyncio
 
-    asyncio.run(runner.run_workflow())
+    asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=1)))
 
 
 def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
@@ -137,6 +149,13 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
         def _save_failures(self):
             self.saved_failures += 1
 
+        def add_structured_concept(self, concept):
+            self.generated_ideas[concept.concept.lower()] = {"concept": concept.concept}
+
+        def add_failed_concept(self, concept, reason):
+            self.failed_concepts[concept.concept.lower()] = {"concept": concept.concept, "reason": reason}
+            self.saved_failures += 1
+
     class _Var:
         task_id = "075_demo"
         difficulty = "BEGINNER"
@@ -165,7 +184,7 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
-    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration: None)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(
         runner,
@@ -183,7 +202,7 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
 
     import asyncio
 
-    asyncio.run(runner.run_workflow())
+    asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=1)))
     mem = memory_holder["mem"]
     assert "statefulsets" in mem.failed_concepts
     assert mem.saved_failures > 0

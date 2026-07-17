@@ -58,6 +58,26 @@ Contains the main workflow runner:
 - `run_workflow`: Main async function that orchestrates the entire workflow
 - `main`: Entry point
 
+## Runtime Configuration
+
+The workflow runtime is configured via CLI flags (no code edits required):
+
+```bash
+python workflow.py \
+  --iterations 20 \
+  --max-retries 2 \
+  --no-reset-minikube \
+  --minikube-delete-timeout 120 \
+  --minikube-start-timeout 300 \
+  --graph-output workflow_graph.png
+```
+
+Defaults:
+- `--iterations 80`
+- `--max-retries 3`
+- minikube reset enabled per iteration
+- delete timeout `120s`, start timeout `300s`
+
 ## Related Components
 
 ### workflow/idea_generator.py
@@ -116,7 +136,8 @@ asyncio.run(run_workflow())
 - **Retry Logic**: Automatically retries failed tasks up to max_retries (default: 3)
 - **Validation**: Validates task structure and file syntax
 - **Testing**: Runs pytest tests to ensure task correctness
+- **Fail-Fast State Handling**: Missing required workflow state raises explicit errors; no silent defaulting
 - **Conditional Routing**: Uses selection functions for dynamic workflow paths
 - **State Management**: Uses shared state to pass data between executors
 - **Failure Tracking**: Moves failed tasks to unsuccessful folder with detailed reports
-- **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True`
+- **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True` using JUnit XML result parsing

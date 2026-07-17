@@ -157,6 +157,12 @@ def test_idea_agent_factory_responses_branch_with_constraints(monkeypatch):
             self.generated_ideas = {"a": {"concept": "Secrets"}}
             self.failed_concepts = {"b": {"concept": "Jobs"}}
 
+        def build_constraints_blocks(self):
+            return [
+                "IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n- Secrets",
+                "IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n- Jobs",
+            ]
+
     monkeypatch.setattr("agent_framework.openai.OpenAIChatClient", _FakeChatClient)
     monkeypatch.setattr(idea_agent, "TaskIdeasMemory", FakeMemory)
     monkeypatch.setattr(

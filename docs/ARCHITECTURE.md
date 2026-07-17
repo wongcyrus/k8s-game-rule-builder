@@ -5,6 +5,7 @@
 AI agents powered by Azure OpenAI generate Kubernetes learning game tasks. Each task is a self-contained directory with templates, tests, and documentation. The workflow generates tasks in a loop, validates them, runs tests against a minikube cluster, and uses a Fixer Agent to patch failures in place.
 
 Authentication uses **Azure CLI credentials** (`AzureCliCredential`). The configured model determines which API is used — Chat Completions for standard models, Responses API for codex models. See `agents/config.py`.
+The runtime is intentionally **fail-fast**: required state/config must be present, and malformed tool outputs are surfaced as errors instead of being silently defaulted.
 
 ### High-Level Overview
 
@@ -38,7 +39,7 @@ graph LR
 
 ## Workflow
 
-The runner (`workflow/runner.py`) executes **80 iterations** by default. Each iteration generates one task:
+The runner (`workflow/runner.py`) executes **80 iterations by default** and supports CLI overrides (`--iterations`, `--max-retries`, minikube reset/timeouts, graph output). Each iteration generates one task:
 
 ```mermaid
 flowchart TD
@@ -79,6 +80,7 @@ Minikube is reset (delete + start) before each iteration.
 ### Key behaviors
 
 - **Fix, not regenerate**: On failure the Fixer Agent reads existing files, analyzes errors, and writes only the broken files back. The task stays in the game folder throughout retries.
+- **No fallback assumptions**: Executors require explicit state (`retry_count`, `max_retries`, validation state, failure reason state). Missing data raises explicit errors to avoid hidden drift.
 - **Skip-answer validation**: After tests pass, pytest runs again with `SKIP_ANSWER_TESTS=True` to confirm `test_05_check.py` fails when the answer isn't deployed.
 - **Failure reporting**: After max retries, the task is moved to `unsuccessful/<game_name>/` with a `FAILURE_REPORT.txt` containing failure reasons, session.json content, and raw test output.
 
@@ -158,7 +160,8 @@ Two JSON files at the project root:
 | `task_ideas_memory.json` | Successfully generated concepts — prevents re-generation |
 | `task_ideas_failure_memory.json` | Concepts that failed validation/testing — prevents retrying |
 
-Memory is injected via `TaskIdeasMemoryMiddleware` (Chat Completions) or prepended to instructions (Responses API).
+`TaskIdeasMemory` owns memory mutation/query APIs (`add_structured_concept`, `add_failed_concept`, `concept_exists`).
+`TaskIdeasMemoryMiddleware` is read-only injection for Chat Completions, while Responses API paths prepend constraints to instructions.
 
 ## MCP Integration
 

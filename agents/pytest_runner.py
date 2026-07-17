@@ -132,8 +132,10 @@ def get_pytest_runner():
             if match:
                 command = match.group(0).strip()
             else:
-                # Fallback: assume the prompt is the command
-                command = prompt.strip()
+                raise ValueError(
+                    "Could not extract pytest command from prompt. "
+                    "Expected a line starting with 'pytest'."
+                )
             
             logging.info(f"Running pytest: {command}")
             result = run_pytest_command(command)

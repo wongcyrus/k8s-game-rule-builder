@@ -6,6 +6,7 @@ A Python project for building Kubernetes learning game rules using AI agents pow
 
 - **AI-Powered Task Generation**: Uses Azure OpenAI agents to generate progressive Kubernetes learning tasks (Beginner → Intermediate → Advanced)
 - **Fix-on-Failure Workflow**: Failed tasks are fixed in place by a specialized Fixer Agent instead of regenerated from scratch
+- **Fail-Fast Runtime**: No silent fallback behavior — missing workflow state or malformed tool outputs raise explicit errors
 - **Intelligent Memory System**: Tracks generated and failed concepts across sessions to prevent duplicates
 - **MCP Integration**: Leverages the official [Model Context Protocol filesystem server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) for file operations
 - **Automated Test Creation**: Generates complete test suites with setup, validation, and cleanup
@@ -50,25 +51,18 @@ The project authenticates via **Azure CLI credentials** — no API keys in code 
    ```bash
    az login
    ```
-3. Edit `agents/config.py` to point to your Azure OpenAI resource:
-   ```python
-   @dataclass(frozen=True)
-   class AzureOpenAI:
-       endpoint: str = "https://your-resource-name.openai.azure.com/"
-       deployment_name: str = "gpt-5.3-codex"  # Your deployment name
+3. Set required environment variables in `.env` at the repository root (auto-loaded), for example:
+   ```bash
+   AZURE_OPENAI_ENDPOINT="https://your-resource-name.openai.azure.com/"
+   AZURE_OPENAI_DEPLOYMENT_NAME="gpt-5.3-codex"
    ```
-
-That's it. All agents pick up the endpoint and model from this single config.
 
 ### Changing the Model
 
-To switch models, change `deployment_name` in `agents/config.py`:
+To switch models, update:
 
-```python
-@dataclass(frozen=True)
-class AzureOpenAI:
-    endpoint: str = "https://your-resource-name.openai.azure.com/"
-    deployment_name: str = "gpt-5.3-codex"  # ← change this
+```bash
+AZURE_OPENAI_DEPLOYMENT_NAME="your-model-name"
 ```
 
 The project automatically selects the right API based on the model:
@@ -94,33 +88,28 @@ RESPONSES_ONLY_PREFIXES: tuple[str, ...] = (
 
 ### Configuration
 
-All paths and settings live in `agents/config.py`:
+All runtime config is loaded from environment variables (fail-fast at startup).  
+By default `agents/config.py` auto-loads `.env` from the repository root if it exists.
 
-```python
-@dataclass(frozen=True)
-class Paths:
-    tests_root: Path = Path("/path/to/tests")       # Where game tasks are generated
-    game_name: str = "game02"                        # Target game folder
-    pytest_rootdir: Path = Path("/path/to/project")  # Working dir for pytest
-    k8s_docs_root: Path = Path("/path/to/k8s/docs")  # K8s docs for idea agent
-    unsuccessful_root: Path = Path("/path/to/unsuccessful")  # Failed tasks
+```bash
+K8S_RULE_TESTS_ROOT="/path/to/k8s-game-rule/tests"
+K8S_RULE_GAME_NAME="game02"
+K8S_RULE_PYTEST_ROOTDIR="/path/to/k8s-game-rule"
+K8S_RULE_K8S_DOCS_ROOT="/path/to/k8s-docs/concepts"
+K8S_RULE_UNSUCCESSFUL_ROOT="/path/to/k8s-game-rule/unsuccessful"
 ```
-
-- **`game_name`** — Change this to generate tasks under a different game folder (e.g., `"game03"`)
-- **`tests_root`** — Root directory where game folders live
-- **`k8s_docs_root`** — Local copy of Kubernetes docs, read by the Idea Agent via MCP
-- **`unsuccessful_root`** — Where failed tasks are moved after all retries are exhausted
 
 ### Workflow Tuning
 
-In `workflow/runner.py` you can adjust how many tasks are generated per run and how many fix attempts each task gets:
+Use CLI flags instead of editing code:
 
-```python
-# workflow/runner.py
-num_iterations = 80   # Number of tasks to generate per run
-
-# workflow/models.py (passed via InitialWorkflowState)
-max_retries = 3       # Fix attempts per task before giving up
+```bash
+python workflow.py \
+  --iterations 20 \
+  --max-retries 2 \
+  --no-reset-minikube \
+  --minikube-delete-timeout 120 \
+  --minikube-start-timeout 300
 ```
 
 ## Usage
@@ -212,6 +201,8 @@ Each iteration:
 
 **Fix instead of regenerate**: On failure, the Fixer Agent reads the existing files, analyzes the specific errors (validation failures, test output), and patches only the broken files. This preserves working code and has a higher success rate than regenerating from scratch.
 
+**Fail fast, no fallback**: The workflow and helper wrappers intentionally reject incomplete state and malformed prompts/outputs with explicit errors instead of assuming defaults. This keeps failures visible and prevents hidden drift.
+
 **No LLM for validation/testing**: Validation and test execution are deterministic operations. Using pure Python functions is faster, cheaper, and more reliable than routing through an LLM.
 
 **Skip-answer validation**: After tests pass, an extra step runs pytest with `SKIP_ANSWER_TESTS=True` to confirm that `test_05_check.py` correctly fails when the answer isn't deployed. This catches tests that would pass regardless of the student's answer.
@@ -286,7 +277,7 @@ The project uses two JSON files for cross-session memory:
 - **`task_ideas_memory.json`** — Successfully generated concepts (prevents re-generation)
 - **`task_ideas_failure_memory.json`** — Concepts that failed validation/testing (prevents retrying known failures)
 
-Memory is injected into the Idea Agent via `TaskIdeasMemoryMiddleware` (Chat Completions) or prepended to instructions (Responses API).
+`TaskIdeasMemory` owns all memory mutation/query methods (`add_structured_concept`, `add_failed_concept`, `concept_exists`). `TaskIdeasMemoryMiddleware` is read-only and only injects constraints into the idea agent prompt.
 
 ## MCP Integration
 

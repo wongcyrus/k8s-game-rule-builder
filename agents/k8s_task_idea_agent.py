@@ -203,6 +203,63 @@ class TaskIdeasMemory:
                     json.dump({"ideas": {}}, f, indent=2)
         except Exception as e:
             logging.error(f"Failed to initialize memory file {path}: {e}")
+
+    def add_structured_concept(self, concept_data: K8sTaskConcept) -> None:
+        """Add a structured concept to success memory."""
+        concept_key = concept_data.concept.replace(" ", "_").replace("*", "").lower()
+        if self.concept_exists(concept_data.concept):
+            return
+
+        self.generated_ideas[concept_key] = {
+            "concept": concept_data.concept,
+            "description": concept_data.description,
+            "variations": [v.task_id for v in concept_data.variations],
+            "difficulty": "Mixed (Beginner→Intermediate→Advanced)",
+            "tags": concept_data.tags,
+        }
+        self._save_ideas()
+
+    def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
+        """Record a concept that failed later in the workflow."""
+        concept_key = concept_data.concept.replace(" ", "_").replace("*", "").lower()
+        self.failed_concepts[concept_key] = {
+            "concept": concept_data.concept,
+            "description": concept_data.description,
+            "variations": [v.task_id for v in concept_data.variations],
+            "reason": reason,
+            "tags": concept_data.tags,
+        }
+        self._save_failures()
+
+    def get_ideas(self) -> list[dict]:
+        """Get all recorded ideas."""
+        return list(self.generated_ideas.values())
+
+    def concept_exists(self, concept: str) -> bool:
+        """Check if a concept has already been generated."""
+        return any(idea["concept"].lower() == concept.lower() for idea in self.generated_ideas.values())
+
+    def build_constraints_blocks(self) -> list[str]:
+        """Build memory constraint blocks for prompt/instruction injection."""
+        blocks: list[str] = []
+        if self.generated_ideas:
+            concepts_list = "\n".join(
+                f"- {idea['concept']}" for idea in self.generated_ideas.values()
+            )
+            blocks.append(
+                "IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n"
+                + concepts_list
+            )
+
+        if self.failed_concepts:
+            failed_list = "\n".join(
+                f"- {idea['concept']}" for idea in self.failed_concepts.values()
+            )
+            blocks.append(
+                "IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n"
+                + failed_list
+            )
+        return blocks
     
 class TaskIdeasMemoryMiddleware(AgentMiddleware):
     """Middleware that injects task idea memory into agent prompt reliably (Python SDK)."""
@@ -216,25 +273,7 @@ class TaskIdeasMemoryMiddleware(AgentMiddleware):
             " Select a concept suitable for a learning game and avoid overly common demos unless memory explicitly allows them."
         ]
 
-        # Append success-memory constraints when available
-        if self.memory.generated_ideas:
-            concepts_list = "\n".join(
-                f"- {idea['concept']}" for idea in self.memory.generated_ideas.values()
-            )
-            blocks.append(
-                "IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n"
-                + concepts_list
-            )
-
-        # Append failure-memory constraints when available
-        if self.memory.failed_concepts:
-            failed_list = "\n".join(
-                f"- {idea['concept']}" for idea in self.memory.failed_concepts.values()
-            )
-            blocks.append(
-                "IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n"
-                + failed_list
-            )
+        blocks.extend(self.memory.build_constraints_blocks())
 
         injected = "\n\n".join(blocks)
         logging.info("✅ Injecting task ideas constraints via middleware")
@@ -243,42 +282,6 @@ class TaskIdeasMemoryMiddleware(AgentMiddleware):
         context.messages.insert(0, Message(role="system", contents=[injected]))
 
         await call_next()
-    
-    def add_structured_concept(self, concept_data: K8sTaskConcept) -> None:
-        """Add a structured concept to memory."""
-        task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
-        if self.concept_exists(concept_data.concept):
-            return
-        
-        self.generated_ideas[task_id] = {
-            "concept": concept_data.concept,
-            "description": concept_data.description,
-            "variations": [v.task_id for v in concept_data.variations],
-            "difficulty": "Mixed (Beginner→Intermediate→Advanced)",
-            "tags": concept_data.tags,
-        }
-        self._save_ideas()
-
-    # --- Failure memory (backwards compatibility) ---
-    def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
-        """Record a concept that failed later in the workflow."""
-        task_id = concept_data.concept.replace(" ", "_").replace("*", "").lower()
-        self.failed_concepts[task_id] = {
-            "concept": concept_data.concept,
-            "description": concept_data.description,
-            "variations": [v.task_id for v in concept_data.variations],
-            "reason": reason,
-            "tags": concept_data.tags,
-        }
-        self._save_failures()
-    
-    def get_ideas(self) -> list[dict]:
-        """Get all recorded ideas."""
-        return list(self.generated_ideas.values())
-    
-    def concept_exists(self, concept: str) -> bool:
-        """Check if a concept has already been generated."""
-        return any(idea["concept"].lower() == concept.lower() for idea in self.generated_ideas.values())
     
 
 
@@ -310,23 +313,7 @@ async def create_idea_agent_with_mcp(mcp_tool):
 
         # Build instructions with memory constraints prepended
         instructions = IDEA_AGENT_INSTRUCTIONS_TOOL_CALL
-        constraints = []
-        if memory.generated_ideas:
-            concepts_list = "\n".join(
-                f"- {idea['concept']}" for idea in memory.generated_ideas.values()
-            )
-            constraints.append(
-                "IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n"
-                + concepts_list
-            )
-        if memory.failed_concepts:
-            failed_list = "\n".join(
-                f"- {idea['concept']}" for idea in memory.failed_concepts.values()
-            )
-            constraints.append(
-                "IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n"
-                + failed_list
-            )
+        constraints = memory.build_constraints_blocks()
         if constraints:
             instructions = "\n\n".join(constraints) + "\n\n" + instructions
             logging.info("✅ Injecting task ideas constraints into Responses agent instructions")

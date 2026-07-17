@@ -2,6 +2,9 @@
 import logging
 import re
 import shutil
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing_extensions import Never
 
 from agent_framework import (
@@ -25,6 +28,173 @@ from workflow.models import (
 _MISSING = object()  # sentinel for get_state fallback detection
 
 
+def _parse_task_metadata_from_prompt(prompt_text: str) -> tuple[str, str]:
+    id_match = re.search(r"(\d{3}_[a-z0-9_]+)", prompt_text)
+    if not id_match:
+        raise ValueError(
+            "Unable to parse task_id from prompt text. Expected format like '050_example_task'."
+        )
+    topic_match = re.search(r"about\s+['\"]([^'\"]+)['\"]", prompt_text)
+    if not topic_match:
+        raise ValueError(
+            "Unable to parse target topic from prompt text. Expected pattern: about 'Topic'."
+        )
+    return id_match.group(1), topic_match.group(1)
+
+
+def _build_failure_reasons(combined: CombinedValidationResult) -> list[str]:
+    reasons: list[str] = []
+    if not combined.validation.is_valid:
+        reasons.append(f"Validation: {combined.validation.reason}")
+    if not combined.test.is_valid:
+        reasons.append(f"Tests: {combined.test.reason}")
+    return reasons
+
+
+def _build_retry_generation_prompt(combined: CombinedValidationResult) -> str:
+    task_id = combined.test.task_id
+    failure_reasons = _build_failure_reasons(combined)
+    return (
+        f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{combined.target_topic}'. "
+        f"This is retry attempt {combined.retry_count + 1} of {combined.max_retries}. "
+        f"\n\n⚠️  PREVIOUS ATTEMPT FAILED:"
+        f"\n{chr(10).join([f'  - {reason}' for reason in failure_reasons])}"
+        f"\n\nIMPORTANT: You MUST use the exact task ID '{task_id}' - do not generate a new ID."
+        f"\n\n✅ Directory already exists: {PATHS.game_root}/{task_id}/"
+        f"\nWrite all files directly into this directory. Do NOT call create_directory."
+        f"\n\nTask Details:"
+        f"\n- Concept: {combined.target_topic}"
+        f"\n- Description: {combined.concept_description}"
+        f"\n- Difficulty: {combined.difficulty}"
+        f"\n- Objective: {combined.objective}"
+        f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
+        f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
+        f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
+        f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
+        f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
+        f"Use proper Jinja template variables and follow all established patterns. "
+        f"Make sure all files are syntactically correct and tests will pass."
+    )
+
+
+def _build_fix_prompt(combined: CombinedValidationResult, raw_test_output: str) -> str:
+    task_id = combined.test.task_id
+    failure_reasons = _build_failure_reasons(combined)
+    prompt = (
+        f"Fix the failed Kubernetes task '{task_id}' located in '{PATHS.game_root}/{task_id}/'."
+        f"\n\nThis is fix attempt {combined.retry_count + 1} of {combined.max_retries}."
+        f"\n\n⚠️  TASK FAILED WITH THESE ERRORS:"
+        f"\n{chr(10).join([f'  - {reason}' for reason in failure_reasons])}"
+    )
+
+    if raw_test_output:
+        prompt += (
+            f"\n\n📋 FULL TEST OUTPUT:"
+            f"\n```\n{raw_test_output}\n```"
+        )
+
+    prompt += (
+        f"\n\n🔍 YOUR TASK:"
+        f"\n1. READ all files from '{PATHS.game_root}/{task_id}/' to understand the task"
+        f"\n2. READ session.json to see available variables"
+        f"\n3. READ setup.template.yaml to see what resources are deployed"
+        f"\n4. READ answer.template.yaml to understand the solution"
+        f"\n5. ANALYZE the specific errors and identify which files are broken"
+        f"\n6. Make TARGETED FIXES to ONLY the broken files"
+        f"\n7. WRITE ONLY the fixed files back to '{PATHS.game_root}/{task_id}/'"
+        f"\n\n⚠️  CRITICAL: DO NOT rewrite all files! Only fix the broken ones!"
+        f"\n\n⚠️  FILE WRITING RULES:"
+        f"\n- Use ABSOLUTE paths for all file operations — e.g. {PATHS.game_root}/{task_id}/file.py"
+        f"\n- Task stays in '{PATHS.game_root}/{task_id}/' during retry attempts"
+        f"\n- Read files from '{PATHS.game_root}/{task_id}/'"
+        f"\n- Identify which specific files are broken from error messages"
+        f"\n- Write ONLY the fixed files back to '{PATHS.game_root}/{task_id}/'"
+        f"\n- DO NOT write files that are working correctly"
+        f"\n- Example: If only test_02_ready.py is broken, write only test_02_ready.py"
+        f"\n- Example: If test_02_ready.py and session.json are broken, write only those 2 files"
+        f"\n\n📝 Required Files (for reference - only fix what's broken):"
+        f"\n  1. __init__.py (empty file)"
+        f"\n  2. instruction.md (challenge description)"
+        f"\n  3. concept.md (learning material - NO solution code)"
+        f"\n  4. session.json (plain JSON with variables)"
+        f"\n  5. setup.template.yaml (Jinja template)"
+        f"\n  6. answer.template.yaml (Jinja template)"
+        f"\n  7. test_01_setup.py (deploy setup)"
+        f"\n  8. test_02_ready.py (wait for resources)"
+        f"\n  9. test_03_answer.py (deploy answer)"
+        f"\n  10. test_05_check.py (validate solution)"
+        f"\n  11. test_06_cleanup.py (cleanup)"
+        f"\n  12. test_04_challenge.py (optional - only if needed)"
+        f"\n- If a file is missing → create it"
+        f"\n- If a file is broken → fix and write only that file"
+        f"\n- If a file is working → DO NOT write it"
+        f"\n\n📝 Task Context:"
+        f"\n- Task ID: {task_id}"
+        f"\n- Concept: {combined.target_topic}"
+        f"\n- Description: {combined.concept_description}"
+        f"\n- Difficulty: {combined.difficulty}"
+        f"\n- Objective: {combined.objective}"
+        f"\n\n✅ QUALITY CHECKLIST:"
+        f"\n- Fix ONLY the broken parts, preserve working code"
+        f"\n- Write ONLY the files you fixed"
+        f"\n- session.json must be plain JSON (NOT Jinja template)"
+        f"\n- YAML templates must use proper Jinja2 syntax: {{{{ variable }}}}"
+        f"\n- test_02_ready.py must check resources from setup.template.yaml (NOT answer.template.yaml!)"
+        f"\n  → DEBUGGING: Read session.json + setup.template.yaml to find correct variable names"
+        f"\n  → DON'T just increase timeout - fix the root cause (wrong resource, wrong variable, wrong file)"
+        f"\n  → Test flow: test_01_setup.py deploys setup → test_02_ready.py waits for setup resources"
+        f"\n  → Then: test_03_answer.py deploys answer → test_05_check.py validates answer resources"
+        f"\n- All tests must use try/except and .get() for safe JSON access"
+        f"\n- Ensure proper Python indentation and syntax"
+        f"\n- Ensure proper YAML indentation (2 spaces)"
+    )
+    return prompt
+
+
+def _create_skip_answer_junit_path(task_id: str) -> Path:
+    file = tempfile.NamedTemporaryFile(
+        prefix=f"skip_answer_{task_id}_",
+        suffix=".xml",
+        delete=False,
+    )
+    file.close()
+    return Path(file.name)
+
+
+def _build_skip_answer_pytest_command(task_directory: str, junit_path: Path) -> str:
+    return (
+        f"pytest --import-mode=importlib --rootdir=. --junitxml={junit_path} "
+        f"{task_directory}/"
+    )
+
+
+def _parse_skip_answer_junit(junit_path: Path) -> tuple[bool, bool]:
+    tree = ET.parse(junit_path)
+    root = tree.getroot()
+    test_05_failed = False
+    test_03_skipped = False
+
+    for testcase in root.iter("testcase"):
+        context = " ".join(
+            filter(
+                None,
+                [
+                    testcase.attrib.get("file"),
+                    testcase.attrib.get("classname"),
+                    testcase.attrib.get("name"),
+                ],
+            )
+        )
+        has_failure_or_error = testcase.find("failure") is not None or testcase.find("error") is not None
+        has_skipped = testcase.find("skipped") is not None
+        if "test_05_check.py" in context and has_failure_or_error:
+            test_05_failed = True
+        if "test_03_answer.py" in context and has_skipped:
+            test_03_skipped = True
+
+    return test_05_failed, test_03_skipped
+
+
 @executor(id="initialize_retry")
 async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialWorkflowState, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
     """Initialize or re-initialize shared state before generation."""
@@ -40,9 +210,9 @@ async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialW
             # Structured data matching InitialWorkflowState fields
             message = InitialWorkflowState(**message)
         else:
-            # Unknown dict shape — use str representation as prompt
-            import json
-            message = json.dumps(message)
+            raise ValueError(
+                "Unsupported dict message shape. Expected {'input': <str>} or InitialWorkflowState-compatible fields."
+            )
     
     if isinstance(message, InitialWorkflowState):
         logging.info("First run - initializing shared state from InitialWorkflowState")
@@ -69,17 +239,11 @@ async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialW
         target_topic = ctx.get_state("target_topic", _MISSING)
         
         if task_id is _MISSING or target_topic is _MISSING:
-            # First run from DevUI with plain text — try to extract task info
-            # from the prompt and initialize state so the workflow can proceed.
-            prompt_text = message if isinstance(message, str) else ""
-            
-            # Try to extract task_id from prompt (e.g. '050_secrets_management')
-            id_match = re.search(r"(\d{3}_[a-z0-9_]+)", prompt_text)
-            parsed_task_id = id_match.group(1) if id_match else "050_unknown_task"
-            
-            # Try to extract topic from "about 'X'" pattern
-            topic_match = re.search(r"about\s+['\"]([^'\"]+)['\"]", prompt_text)
-            parsed_topic = topic_match.group(1) if topic_match else "Kubernetes"
+            if not isinstance(message, str):
+                raise ValueError(
+                    "Missing task state and message is not a prompt string; cannot initialize retry state."
+                )
+            parsed_task_id, parsed_topic = _parse_task_metadata_from_prompt(message)
             
             ctx.set_state("task_id", parsed_task_id)
             ctx.set_state("target_topic", parsed_topic)
@@ -115,10 +279,10 @@ async def parse_generated_task(response: AgentExecutorResponse, ctx: WorkflowCon
     logging.info("\n[STEP] Parsing generated task...")
     
     if ctx.get_state("retry_count", _MISSING) is _MISSING:
-        ctx.set_state("retry_count", 0)
+        raise ValueError("Missing required workflow state: retry_count")
     
     if ctx.get_state("max_retries", _MISSING) is _MISSING:
-        ctx.set_state("max_retries", 3)
+        raise ValueError("Missing required workflow state: max_retries")
     
     task_id = ctx.get_state("task_id", _MISSING)
     if task_id is _MISSING:
@@ -224,20 +388,18 @@ async def make_decision(test_result: TestResult, ctx: WorkflowContext[CombinedVa
     
     validation = ctx.get_state(f"validation_{test_result.task_id}", _MISSING)
     if validation is _MISSING:
-        validation = ValidationResult(
-            is_valid=True,
-            reason="Validation passed (assumed)",
-            task_id=test_result.task_id,
-            task_directory=test_result.task_directory
+        raise ValueError(
+            f"Missing validation state for task {test_result.task_id}. "
+            "run_validation must execute before make_decision."
         )
     
     retry_count = ctx.get_state("retry_count", _MISSING)
     if retry_count is _MISSING:
-        retry_count = 0
+        raise ValueError("Missing required workflow state: retry_count")
     
     max_retries = ctx.get_state("max_retries", _MISSING)
     if max_retries is _MISSING:
-        max_retries = 3
+        raise ValueError("Missing required workflow state: max_retries")
     
     target_topic = ctx.get_state("target_topic", "")
     concept_description = ctx.get_state("concept_description", "")
@@ -337,33 +499,7 @@ async def retry_generation(combined: CombinedValidationResult, ctx: WorkflowCont
     ctx.set_state("difficulty", difficulty)
     ctx.set_state("objective", objective)
     
-    failure_reasons = []
-    if not combined.validation.is_valid:
-        failure_reasons.append(f"Validation: {combined.validation.reason}")
-    if not combined.test.is_valid:
-        failure_reasons.append(f"Tests: {combined.test.reason}")
-    
-    generation_prompt = (
-        f"Generate a complete Kubernetes learning task with ID '{task_id}' about '{target_topic}'. "
-        f"This is retry attempt {combined.retry_count + 1} of {combined.max_retries}. "
-        f"\n\n⚠️  PREVIOUS ATTEMPT FAILED:"
-        f"\n{chr(10).join([f'  - {reason}' for reason in failure_reasons])}"
-        f"\n\nIMPORTANT: You MUST use the exact task ID '{task_id}' - do not generate a new ID."
-        f"\n\n✅ Directory already exists: {PATHS.game_root}/{task_id}/"
-        f"\nWrite all files directly into this directory. Do NOT call create_directory."
-        f"\n\nTask Details:"
-        f"\n- Concept: {target_topic}"
-        f"\n- Description: {concept_description}"
-        f"\n- Difficulty: {difficulty}"
-        f"\n- Objective: {objective}"
-        f"\n\nCreate ALL required files including __init__.py, instruction.md, concept.md, session.json, "
-        f"setup.template.yaml, answer.template.yaml, and all test files (test_01_setup.py, "
-        f"test_02_ready.py, test_03_answer.py, test_05_check.py, test_06_cleanup.py). "
-        f"Include test_04_challenge.py only if the task requires pre-validation actions like load generation. "
-        f"test_02_ready.py must test that resources from setup.template.yaml are ready. "
-        f"Use proper Jinja template variables and follow all established patterns. "
-        f"Make sure all files are syntactically correct and tests will pass."
-    )
+    generation_prompt = _build_retry_generation_prompt(combined)
     
     await ctx.send_message(
         AgentExecutorRequest(
@@ -397,12 +533,6 @@ async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[Agen
     ctx.set_state("difficulty", difficulty)
     ctx.set_state("objective", objective)
     
-    failure_reasons = []
-    if not combined.validation.is_valid:
-        failure_reasons.append(f"Validation: {combined.validation.reason}")
-    if not combined.test.is_valid:
-        failure_reasons.append(f"Tests: {combined.test.reason}")
-    
     # Get raw test output if available
     raw_test_output = ""
     val = ctx.get_state(f"raw_output_{task_id}", _MISSING)
@@ -414,74 +544,7 @@ async def fix_task(combined: CombinedValidationResult, ctx: WorkflowContext[Agen
     if not raw_test_output:
         logging.warning(f"No raw test output available for {task_id}")
     
-    fix_prompt = (
-        f"Fix the failed Kubernetes task '{task_id}' located in '{PATHS.game_root}/{task_id}/'."
-        f"\n\nThis is fix attempt {combined.retry_count + 1} of {combined.max_retries}."
-        f"\n\n⚠️  TASK FAILED WITH THESE ERRORS:"
-        f"\n{chr(10).join([f'  - {reason}' for reason in failure_reasons])}"
-    )
-    
-    if raw_test_output:
-        fix_prompt += (
-            f"\n\n📋 FULL TEST OUTPUT:"
-            f"\n```\n{raw_test_output}\n```"
-        )
-    
-    fix_prompt += (
-        f"\n\n🔍 YOUR TASK:"
-        f"\n1. READ all files from '{PATHS.game_root}/{task_id}/' to understand the task"
-        f"\n2. READ session.json to see available variables"
-        f"\n3. READ setup.template.yaml to see what resources are deployed"
-        f"\n4. READ answer.template.yaml to understand the solution"
-        f"\n5. ANALYZE the specific errors and identify which files are broken"
-        f"\n6. Make TARGETED FIXES to ONLY the broken files"
-        f"\n7. WRITE ONLY the fixed files back to '{PATHS.game_root}/{task_id}/'"
-        f"\n\n⚠️  CRITICAL: DO NOT rewrite all files! Only fix the broken ones!"
-        f"\n\n⚠️  FILE WRITING RULES:"
-        f"\n- Use ABSOLUTE paths for all file operations — e.g. {PATHS.game_root}/{task_id}/file.py"
-        f"\n- Task stays in '{PATHS.game_root}/{task_id}/' during retry attempts"
-        f"\n- Read files from '{PATHS.game_root}/{task_id}/'"
-        f"\n- Identify which specific files are broken from error messages"
-        f"\n- Write ONLY the fixed files back to '{PATHS.game_root}/{task_id}/'"
-        f"\n- DO NOT write files that are working correctly"
-        f"\n- Example: If only test_02_ready.py is broken, write only test_02_ready.py"
-        f"\n- Example: If test_02_ready.py and session.json are broken, write only those 2 files"
-        f"\n\n📝 Required Files (for reference - only fix what's broken):"
-        f"\n  1. __init__.py (empty file)"
-        f"\n  2. instruction.md (challenge description)"
-        f"\n  3. concept.md (learning material - NO solution code)"
-        f"\n  4. session.json (plain JSON with variables)"
-        f"\n  5. setup.template.yaml (Jinja template)"
-        f"\n  6. answer.template.yaml (Jinja template)"
-        f"\n  7. test_01_setup.py (deploy setup)"
-        f"\n  8. test_02_ready.py (wait for resources)"
-        f"\n  9. test_03_answer.py (deploy answer)"
-        f"\n  10. test_05_check.py (validate solution)"
-        f"\n  11. test_06_cleanup.py (cleanup)"
-        f"\n  12. test_04_challenge.py (optional - only if needed)"
-        f"\n- If a file is missing → create it"
-        f"\n- If a file is broken → fix and write only that file"
-        f"\n- If a file is working → DO NOT write it"
-        f"\n\n📝 Task Context:"
-        f"\n- Task ID: {task_id}"
-        f"\n- Concept: {target_topic}"
-        f"\n- Description: {concept_description}"
-        f"\n- Difficulty: {difficulty}"
-        f"\n- Objective: {objective}"
-        f"\n\n✅ QUALITY CHECKLIST:"
-        f"\n- Fix ONLY the broken parts, preserve working code"
-        f"\n- Write ONLY the files you fixed"
-        f"\n- session.json must be plain JSON (NOT Jinja template)"
-        f"\n- YAML templates must use proper Jinja2 syntax: {{{{ variable }}}}"
-        f"\n- test_02_ready.py must check resources from setup.template.yaml (NOT answer.template.yaml!)"
-        f"\n  → DEBUGGING: Read session.json + setup.template.yaml to find correct variable names"
-        f"\n  → DON'T just increase timeout - fix the root cause (wrong resource, wrong variable, wrong file)"
-        f"\n  → Test flow: test_01_setup.py deploys setup → test_02_ready.py waits for setup resources"
-        f"\n  → Then: test_03_answer.py deploys answer → test_05_check.py validates answer resources"
-        f"\n- All tests must use try/except and .get() for safe JSON access"
-        f"\n- Ensure proper Python indentation and syntax"
-        f"\n- Ensure proper YAML indentation (2 spaces)"
-    )
+    fix_prompt = _build_fix_prompt(combined, raw_test_output)
     
     await ctx.send_message(
         AgentExecutorRequest(
@@ -499,22 +562,21 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
     from agents.pytest_runner import run_pytest_command
     import os
     
+    junit_path = _create_skip_answer_junit_path(combined.test.task_id)
+
     # Set environment variable
     original_env = os.environ.get("SKIP_ANSWER_TESTS")
     os.environ["SKIP_ANSWER_TESTS"] = "True"
     
     try:
-        pytest_command = f"pytest --import-mode=importlib --rootdir=. {combined.test.task_directory}/"
+        pytest_command = _build_skip_answer_pytest_command(combined.test.task_directory, junit_path)
         result = run_pytest_command(pytest_command)
         
-        # Parse the output to check if test_05_check.py failed
         raw_output = result.get("details", [""])[0] if result.get("details") else ""
-        
-        # Check if test_05_check.py failed (which is expected)
-        test_05_failed = "test_05_check.py" in raw_output and ("FAILED" in raw_output or "failed" in raw_output.lower())
-        
-        # Check if test_03_answer.py was skipped (which is expected)
-        test_03_skipped = "test_03_answer.py" in raw_output and ("SKIPPED" in raw_output or "skipped" in raw_output.lower())
+        try:
+            test_05_failed, test_03_skipped = _parse_skip_answer_junit(junit_path)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to parse skip-answer junit XML: {exc}") from exc
         
         logging.info(f"test_03_answer.py skipped: {test_03_skipped}")
         logging.info(f"test_05_check.py failed: {test_05_failed}")
@@ -557,6 +619,10 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
             await ctx.send_message(updated_combined)
     
     finally:
+        try:
+            junit_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logging.warning(f"Failed to remove junit file {junit_path}: {exc}")
         # Restore original environment variable
         if original_env is None:
             os.environ.pop("SKIP_ANSWER_TESTS", None)
@@ -592,11 +658,9 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
             # Get failure reasons from shared state
             reasons = ctx.get_state(f"failure_reasons_{combined.test.task_id}", _MISSING)
             if reasons is _MISSING:
-                reasons = []
-                if not combined.validation.is_valid:
-                    reasons.append(f"Validation failed: {combined.validation.reason}")
-                if not combined.test.is_valid:
-                    reasons.append(f"Tests failed: {combined.test.reason}")
+                raise ValueError(
+                    f"Missing failure reasons state for {combined.test.task_id}; remove_task must run first."
+                )
             
             failure_report_path = unsuccessful_task_path / "FAILURE_REPORT.txt"
             

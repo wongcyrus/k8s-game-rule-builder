@@ -3,7 +3,13 @@ from typing import Annotated
 
 from pydantic import Field
 
-from agents.responses_agent import ResponsesAgent, _run_middleware_chain
+from agents.responses_agent import (
+    ResponsesAgent,
+    _run_middleware_chain,
+    _build_auth_header,
+    _extract_text_parts_from_output,
+    _build_function_call_output_item,
+)
 
 
 class _RecordingMiddleware:
@@ -62,3 +68,44 @@ def test_run_middleware_chain_wraps_final_call():
 
     asyncio.run(_run_middleware_chain(middlewares, context, final_call))
     assert events == ["before:a", "before:b", "final", "after:b", "after:a"]
+
+
+def test_build_auth_header_prefixes_token():
+    header = _build_auth_header(lambda: "abc123")
+    assert header["Authorization"] == "Bearer abc123"
+
+
+def test_build_auth_header_accepts_existing_bearer():
+    header = _build_auth_header(lambda: "Bearer abc123")
+    assert header["Authorization"] == "Bearer abc123"
+
+
+def test_extract_text_parts_from_output_ignores_malformed_items():
+    class FakeToolCall:
+        pass
+
+    class FakeOutputMessage:
+        def __init__(self):
+            self.content = [SimpleNamespace(text="ok"), SimpleNamespace(other="x")]
+
+    import agents.responses_agent as responses_agent
+    tool = FakeToolCall()
+    msg = FakeOutputMessage()
+    monkeypatch_tool = responses_agent.ResponseFunctionToolCall
+    monkeypatch_msg = responses_agent.ResponseOutputMessage
+    try:
+        responses_agent.ResponseFunctionToolCall = FakeToolCall
+        responses_agent.ResponseOutputMessage = FakeOutputMessage
+        tool_calls, text_parts = _extract_text_parts_from_output([tool, msg, object()])
+        assert len(tool_calls) == 1
+        assert text_parts == ["ok"]
+    finally:
+        responses_agent.ResponseFunctionToolCall = monkeypatch_tool
+        responses_agent.ResponseOutputMessage = monkeypatch_msg
+
+
+def test_build_function_call_output_item_requires_call_id():
+    import pytest
+
+    with pytest.raises(ValueError, match="missing call_id"):
+        _build_function_call_output_item("", "x")

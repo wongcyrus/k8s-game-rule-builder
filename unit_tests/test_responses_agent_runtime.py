@@ -128,5 +128,45 @@ def test_run_stream_updates_handles_tool_then_text(monkeypatch):
     assert agent._final_response.messages[0].contents[0].text == "final"
 
 
+def test_run_stream_updates_raises_when_token_provider_fails(monkeypatch):
+    monkeypatch.setattr(responses_agent, "ResponseFunctionToolCall", _FakeToolCall)
+    monkeypatch.setattr(responses_agent, "ResponseOutputMessage", _FakeMessage)
+
+    agent = _new_agent()
+    agent._max_consecutive_errors = 1
+    agent._token_provider = lambda: ""
+    agent._client = _FakeClient(_FakeResponsesAPI([]))
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="invalid token"):
+        asyncio.run(agent._run_non_streaming("hello"))
+
+
+def test_run_stream_updates_hits_max_tool_rounds(monkeypatch):
+    monkeypatch.setattr(responses_agent, "ResponseFunctionToolCall", _FakeToolCall)
+    monkeypatch.setattr(responses_agent, "ResponseOutputMessage", _FakeMessage)
+
+    agent = _new_agent()
+    agent._max_tool_rounds = 2
+    agent._execute_tool_call = _fake_execute_tool
+    tool_only = SimpleNamespace(id="r1", output=[_FakeToolCall("tool", "{}", call_id="c1")])
+    agent._client = _FakeClient(_FakeResponsesAPI([tool_only, tool_only]))
+
+    asyncio.run(agent._run_non_streaming("hello"))
+    assert agent._final_response.messages[0].contents[0].text == "Max tool rounds reached."
+
+
+def test_run_stream_updates_handles_malformed_output_items(monkeypatch):
+    monkeypatch.setattr(responses_agent, "ResponseFunctionToolCall", _FakeToolCall)
+    monkeypatch.setattr(responses_agent, "ResponseOutputMessage", _FakeMessage)
+
+    agent = _new_agent()
+    malformed_response = SimpleNamespace(id="r1", output=[object()])
+    agent._client = _FakeClient(_FakeResponsesAPI([malformed_response]))
+    final = asyncio.run(agent._run_non_streaming("hello"))
+    assert final.messages[0].contents[0].text == ""
+
+
 async def _fake_execute_tool(_tool_call):
     return "ok"

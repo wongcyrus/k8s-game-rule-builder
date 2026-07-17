@@ -191,7 +191,7 @@ def test_validate_task_directory_handles_listing_and_loop_exceptions(monkeypatch
     assert any("Unexpected error during per-file validation" in r for r in reasons)
 
 
-def test_get_k8s_task_validator_falls_back_to_raw_prompt(monkeypatch):
+def test_get_k8s_task_validator_raises_without_task_id(monkeypatch):
     captured = {}
 
     def fake_validate(task_dir: str):
@@ -201,5 +201,6 @@ def test_get_k8s_task_validator_falls_back_to_raw_prompt(monkeypatch):
     monkeypatch.setattr(validator, "validate_task_directory", fake_validate)
     wrapper = validator.get_k8s_task_validator()
 
-    asyncio.run(wrapper.run("raw_task_name_without_id"))
-    assert captured["task_dir"] == "raw_task_name_without_id"
+    import pytest
+    with pytest.raises(ValueError, match="Could not extract task directory"):
+        asyncio.run(wrapper.run("raw_task_name_without_id"))

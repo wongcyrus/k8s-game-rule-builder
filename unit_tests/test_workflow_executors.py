@@ -82,6 +82,8 @@ def test_parse_generated_task_uses_state_task_id(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(executors, "PATHS", SimpleNamespace(game_root=tmp_path, game_name="game02"))
     ctx = _FakeCtx()
     ctx.set_state("task_id", "051_demo")
+    ctx.set_state("retry_count", 0)
+    ctx.set_state("max_retries", 3)
     response = SimpleNamespace(agent_response=SimpleNamespace(text="ignored"))
 
     _call_executor(executors.parse_generated_task, response, ctx)
@@ -91,7 +93,7 @@ def test_parse_generated_task_uses_state_task_id(monkeypatch, tmp_path: Path):
     assert sent.task_directory == "tests/game02/051_demo"
 
 
-def test_make_decision_uses_default_validation_when_missing():
+def test_make_decision_requires_validation_state():
     ctx = _FakeCtx()
     test_result = WorkflowTestResult(
         is_valid=True,
@@ -99,12 +101,32 @@ def test_make_decision_uses_default_validation_when_missing():
         task_id="052_demo",
         task_directory="tests/game02/052_demo",
     )
+    import pytest
+    with pytest.raises(ValueError, match="Missing validation state"):
+        _call_executor(executors.make_decision, test_result, ctx)
 
+
+def test_make_decision_success_when_state_present():
+    ctx = _FakeCtx()
+    test_result = WorkflowTestResult(
+        is_valid=True,
+        reason="ok",
+        task_id="052_demo",
+        task_directory="tests/game02/052_demo",
+    )
+    ctx.set_state(
+        "validation_052_demo",
+        ValidationResult(
+            is_valid=True,
+            reason="ok",
+            task_id="052_demo",
+            task_directory="tests/game02/052_demo",
+        ),
+    )
+    ctx.set_state("retry_count", 0)
+    ctx.set_state("max_retries", 3)
     _call_executor(executors.make_decision, test_result, ctx)
-
-    combined = ctx.sent[0]
-    assert combined.validation.is_valid is True
-    assert combined.test.task_id == "052_demo"
+    assert ctx.sent[0].test.task_id == "052_demo"
 
 
 def test_remove_task_increments_retry_and_sets_failure_reasons():
@@ -133,6 +155,7 @@ def test_run_pytest_skip_answer_marks_failure_when_check_does_not_fail(monkeypat
         }
 
     monkeypatch.setattr(pytest_runner, "run_pytest_command", fake_run)
+    monkeypatch.setattr(executors, "_parse_skip_answer_junit", lambda _path: (False, True))
 
     _call_executor(executors.run_pytest_skip_answer, combined, ctx)
 
@@ -187,6 +210,8 @@ def test_initialize_retry_parses_plain_input_dict(monkeypatch, tmp_path: Path):
 def test_parse_generated_task_extracts_id_from_response_text(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(executors, "PATHS", SimpleNamespace(game_root=tmp_path, game_name="game02"))
     ctx = _FakeCtx()
+    ctx.set_state("retry_count", 0)
+    ctx.set_state("max_retries", 3)
     response = SimpleNamespace(
         agent_response=SimpleNamespace(text=f"created at {tmp_path}/061_auto_task")
     )
@@ -293,6 +318,7 @@ def test_run_pytest_skip_answer_success_path_restores_env(monkeypatch):
             "details": ["test_03_answer.py SKIPPED\ntest_05_check.py FAILED"],
         },
     )
+    monkeypatch.setattr(executors, "_parse_skip_answer_junit", lambda _path: (True, True))
     _call_executor(executors.run_pytest_skip_answer, combined, ctx)
 
     assert ctx.sent[0].test.task_id == "066_demo"
@@ -312,6 +338,23 @@ def test_complete_workflow_success_branch():
     assert "successfully generated" in ctx.outputs[0]
 
 
+def test_parse_skip_answer_junit_detects_failed_and_skipped(tmp_path: Path):
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<testsuite tests="2">
+  <testcase classname="tests.game02.test_03_answer.py" name="test_answer">
+    <skipped />
+  </testcase>
+  <testcase classname="tests.game02.test_05_check.py" name="test_check">
+    <failure message="fail">trace</failure>
+  </testcase>
+</testsuite>"""
+    report = tmp_path / "junit.xml"
+    report.write_text(xml, encoding="utf-8")
+    test_05_failed, test_03_skipped = executors._parse_skip_answer_junit(report)
+    assert test_05_failed is True
+    assert test_03_skipped is True
+
+
 def test_initialize_retry_unknown_dict_and_existing_state(monkeypatch, tmp_path: Path):
     fake_paths = SimpleNamespace(game_root=tmp_path / "tests/game02")
     monkeypatch.setattr(executors, "PATHS", fake_paths)
@@ -320,15 +363,16 @@ def test_initialize_retry_unknown_dict_and_existing_state(monkeypatch, tmp_path:
     ctx.set_state("target_topic", "Pods")
 
     payload = {"unexpected": 1}
-    _call_executor(executors.initialize_retry, payload, ctx)
-
-    assert (fake_paths.game_root / "068_demo").exists()
-    assert len(ctx.sent) == 1
+    import pytest
+    with pytest.raises(ValueError, match="Unsupported dict message shape"):
+        _call_executor(executors.initialize_retry, payload, ctx)
 
 
 def test_parse_generated_task_raises_when_no_id(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(executors, "PATHS", SimpleNamespace(game_root=tmp_path, game_name="game02"))
     ctx = _FakeCtx()
+    ctx.set_state("retry_count", 0)
+    ctx.set_state("max_retries", 3)
     response = SimpleNamespace(agent_response=SimpleNamespace(text="no task id here"))
 
     import pytest
@@ -417,6 +461,7 @@ def test_complete_workflow_uses_default_reasons_and_timestamp_on_collision(monke
     monkeypatch.setattr(time, "strftime", lambda _fmt: "20260101_000000")
 
     ctx = _FakeCtx()
+    ctx.set_state("failure_reasons_074_demo", ["Validation failed: validation failed"])
     combined = _combined(task_id=task_id, retry_count=3, max_retries=3)
     _call_executor(executors.complete_workflow, combined, ctx)
 

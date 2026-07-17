@@ -69,10 +69,17 @@ def test_task_ideas_memory_persists_and_loads():
 
 
 def test_task_ideas_middleware_injects_constraints():
-    memory = SimpleNamespace(
-        generated_ideas={"a": {"concept": "Secrets"}},
-        failed_concepts={"b": {"concept": "Jobs"}},
-    )
+    class FakeMemory:
+        generated_ideas = {"a": {"concept": "Secrets"}}
+        failed_concepts = {"b": {"concept": "Jobs"}}
+
+        def build_constraints_blocks(self):
+            return [
+                "IMPORTANT: Do NOT suggest these previously covered Kubernetes concepts:\n- Secrets",
+                "IMPORTANT: Do NOT suggest these concepts that previously FAILED validation:\n- Jobs",
+            ]
+
+    memory = FakeMemory()
     middleware = idea_agent.TaskIdeasMemoryMiddleware(memory)
     context = SimpleNamespace(messages=[])
     called = {"ok": False}
@@ -95,19 +102,37 @@ def test_task_ideas_middleware_add_and_query_concepts():
     failure_file = f"tests/.tmp_failure_{suffix}.json"
     try:
         memory = TaskIdeasMemory(memory_file=memory_file, failure_memory_file=failure_file)
-        middleware = idea_agent.TaskIdeasMemoryMiddleware(memory)
         concept = _concept("CronJobs")
 
-        middleware.generated_ideas = {}
-        middleware.failed_concepts = {}
-        middleware._save_ideas = lambda: None
-        middleware._save_failures = lambda: None
+        memory.generated_ideas = {}
+        memory.failed_concepts = {}
+        memory._save_ideas = lambda: None
+        memory._save_failures = lambda: None
 
-        middleware.add_structured_concept(concept)
-        middleware.add_failed_concept(concept, reason="validation")
+        memory.add_structured_concept(concept)
+        memory.add_failed_concept(concept, reason="validation")
 
-        assert middleware.concept_exists("cronjobs") is True
-        assert len(middleware.get_ideas()) == 1
+        assert memory.concept_exists("cronjobs") is True
+        assert len(memory.get_ideas()) == 1
+    finally:
+        for rel in [memory_file, failure_file]:
+            p = Path(__file__).resolve().parents[1] / rel
+            if p.exists():
+                p.unlink()
+
+
+def test_memory_build_constraints_blocks():
+    suffix = uuid.uuid4().hex
+    memory_file = f"tests/.tmp_memory_{suffix}.json"
+    failure_file = f"tests/.tmp_failure_{suffix}.json"
+    try:
+        memory = TaskIdeasMemory(memory_file=memory_file, failure_memory_file=failure_file)
+        memory.generated_ideas = {"a": {"concept": "Secrets"}}
+        memory.failed_concepts = {"b": {"concept": "Jobs"}}
+        blocks = memory.build_constraints_blocks()
+        merged = "\n".join(blocks)
+        assert "Secrets" in merged
+        assert "Jobs" in merged
     finally:
         for rel in [memory_file, failure_file]:
             p = Path(__file__).resolve().parents[1] / rel

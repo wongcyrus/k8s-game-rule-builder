@@ -37,6 +37,46 @@ def _get_token_provider(credential: AzureCliCredential):
     )
 
 
+def _build_auth_header(token_provider: Callable[[], str]) -> dict[str, str]:
+    """Build authorization header from a token provider with validation."""
+    token = token_provider()
+    if not token or not isinstance(token, str):
+        raise RuntimeError("Token provider returned an empty or invalid token.")
+    if token.lower().startswith("bearer "):
+        return {"Authorization": token}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _extract_text_parts_from_output(
+    response_output: Sequence[Any],
+) -> tuple[list[ResponseFunctionToolCall], list[str]]:
+    """Split response output into function calls and assistant text parts."""
+    tool_calls: list[ResponseFunctionToolCall] = []
+    text_parts: list[str] = []
+    for item in response_output:
+        if isinstance(item, ResponseFunctionToolCall):
+            tool_calls.append(item)
+            continue
+        if isinstance(item, ResponseOutputMessage):
+            content_items = getattr(item, "content", None) or []
+            for content in content_items:
+                text = getattr(content, "text", None)
+                if isinstance(text, str):
+                    text_parts.append(text)
+    return tool_calls, text_parts
+
+
+def _build_function_call_output_item(call_id: str, output: str) -> dict[str, str]:
+    """Build a Responses API function_call_output payload item."""
+    if not call_id:
+        raise ValueError("Tool call is missing call_id")
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": output,
+    }
+
+
 class _ToolCallContext:
     """Minimal context passed to middleware during tool invocation."""
     def __init__(self, function, arguments, kwargs):
@@ -336,7 +376,7 @@ class ResponsesAgent:
                     call_kwargs["input"] = input_text
 
                 response: Response = await self._client.responses.create(
-                    extra_headers={"Authorization": f"Bearer {self._token_provider()}"},
+                    extra_headers=_build_auth_header(self._token_provider),
                     **call_kwargs,
                 )
                 previous_response_id = response.id
@@ -349,16 +389,7 @@ class ResponsesAgent:
                 continue
 
             # Process output items
-            tool_calls = []
-            text_parts = []
-
-            for item in response.output:
-                if isinstance(item, ResponseFunctionToolCall):
-                    tool_calls.append(item)
-                elif isinstance(item, ResponseOutputMessage):
-                    for content in item.content:
-                        if hasattr(content, "text"):
-                            text_parts.append(content.text)
+            tool_calls, text_parts = _extract_text_parts_from_output(response.output)
 
             # If no tool calls, we're done
             if not tool_calls:
@@ -384,11 +415,9 @@ class ResponsesAgent:
                     if consecutive_errors >= self._max_consecutive_errors:
                         raise
 
-                self._pending_input.append({
-                    "type": "function_call_output",
-                    "call_id": tc.call_id,
-                    "output": result,
-                })
+                self._pending_input.append(
+                    _build_function_call_output_item(tc.call_id, result)
+                )
 
             # Yield a heartbeat so the framework knows we're still working
             yield AgentResponseUpdate()
