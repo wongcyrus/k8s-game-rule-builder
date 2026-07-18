@@ -239,6 +239,8 @@ flowchart TD
     LOOP -->|No| FAIL([❌ Move to unsuccessful/])
 ```
 
+![Rule Builder Workflow](docs/diagrams/deep-dive-diagram-1.png)
+
 ## Multi-graph architecture views
 
 ### 1) Control-plane graph (orchestration DAG)
@@ -263,6 +265,8 @@ flowchart LR
     N --> O[fixer_agent]
     O --> C
 ```
+
+![Control-plane graph](docs/diagrams/deep-dive-diagram-2.png)
 
 ### 2) Runtime sequence (who calls what)
 
@@ -295,6 +299,8 @@ sequenceDiagram
     end
 ```
 
+![Runtime sequence](docs/diagrams/deep-dive-diagram-3.png)
+
 ### 3) State machine (task lifecycle)
 
 ```mermaid
@@ -314,6 +320,8 @@ stateDiagram-v2
     FailedTerminal --> [*]
 ```
 
+![Task lifecycle state machine](docs/diagrams/deep-dive-diagram-4.png)
+
 ### 4) Prompt lifecycle graph (how prompts evolve)
 
 ```mermaid
@@ -328,6 +336,8 @@ flowchart TD
     P6 --> P3
     P7 --> P3
 ```
+
+![Prompt lifecycle graph](docs/diagrams/deep-dive-diagram-5.png)
 
 ### 5) MCP + Kubernetes execution boundary graph
 
@@ -356,6 +366,8 @@ flowchart LR
     Repo --> V
     V --> T
 ```
+
+![MCP and Kubernetes execution boundary](docs/diagrams/deep-dive-diagram-6.png)
 
 ## Core Agent Framework Primitives Used
 
