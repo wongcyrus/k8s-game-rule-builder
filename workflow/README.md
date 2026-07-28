@@ -140,4 +140,6 @@ asyncio.run(run_workflow())
 - **Conditional Routing**: Uses selection functions for dynamic workflow paths
 - **State Management**: Uses shared state to pass data between executors
 - **Failure Tracking**: Moves failed tasks to unsuccessful folder with detailed reports
+- **K8s Preflight Gate**: Verifies Kubernetes connectivity once before any task generation begins
+- **Environment Quarantine**: Isolates tasks into `environment_failed/` without touching memory when the cluster breaks mid-run
 - **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True` using JUnit XML result parsing

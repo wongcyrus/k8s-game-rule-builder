@@ -231,6 +231,16 @@ class TaskIdeasMemory:
         }
         self._save_failures()
 
+    def remove_concept(self, concept: str) -> None:
+        """Remove a concept from memory stores when the environment invalidates the run."""
+        concept_key = concept.replace(" ", "_").replace("*", "").lower()
+        removed_generated = self.generated_ideas.pop(concept_key, None) is not None
+        removed_failed = self.failed_concepts.pop(concept_key, None) is not None
+        if removed_generated:
+            self._save_ideas()
+        if removed_failed:
+            self._save_failures()
+
     def get_ideas(self) -> list[dict]:
         """Get all recorded ideas."""
         return list(self.generated_ideas.values())

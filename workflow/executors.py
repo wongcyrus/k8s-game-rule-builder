@@ -3,6 +3,7 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing_extensions import Never
@@ -24,8 +25,70 @@ from workflow.models import (
     TestResult,
     CombinedValidationResult,
 )
+from workflow.preflight import (
+    K8sConnectivityError,
+    QuarantinedTaskError,
+    run_k8s_preflight_check,
+)
 
 _MISSING = object()  # sentinel for get_state fallback detection
+
+
+def _environment_failed_game_root() -> Path:
+    unsuccessful_game_root = Path(PATHS.unsuccessful_game_root)
+    return unsuccessful_game_root.parent.parent / "environment_failed" / unsuccessful_game_root.name
+
+
+def _destination_task_path(base_dir: Path, task_id: str) -> Path:
+    destination = base_dir / task_id
+    if destination.exists():
+        destination = base_dir / f"{task_id}_{time.strftime('%Y%m%d_%H%M%S')}"
+    return destination
+
+
+def _read_session_json(task_dir: Path) -> str:
+    session_json_path = task_dir / "session.json"
+    if not session_json_path.exists():
+        return ""
+    try:
+        return session_json_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        logging.warning(f"⚠️  Could not read session.json: {exc}")
+        return ""
+
+
+def _write_environment_failure_report(
+    *,
+    combined: CombinedValidationResult,
+    destination_dir: Path,
+    raw_test_output: str,
+    connectivity_error: K8sConnectivityError,
+) -> None:
+    report_path = destination_dir / "ENVIRONMENT_FAILURE_REPORT.txt"
+    session_json_content = _read_session_json(destination_dir)
+    with open(report_path, "w", encoding="utf-8") as file:
+        file.write(f"Task ID: {combined.test.task_id}\n")
+        file.write("Status: Quarantined due to Kubernetes environment failure\n")
+        file.write(f"Retry Count At Interruption: {combined.retry_count}\n")
+        file.write(f"Connectivity Failure: {connectivity_error}\n")
+        if connectivity_error.command:
+            file.write(f"Connectivity Check Command: {connectivity_error.command}\n")
+        if connectivity_error.output:
+            file.write(f"\nConnectivity Check Output:\n{connectivity_error.output}\n")
+        file.write(f"\nValidation Details:\n")
+        file.write(f"  Valid: {combined.validation.is_valid}\n")
+        file.write(f"  Reason: {combined.validation.reason}\n")
+        file.write(f"\nTest Details:\n")
+        file.write(f"  Valid: {combined.test.is_valid}\n")
+        file.write(f"  Reason: {combined.test.reason}\n")
+        if session_json_content:
+            file.write(f"\n{'='*80}\nSESSION.JSON CONTENT:\n{'='*80}\n")
+            file.write(session_json_content)
+            file.write(f"\n{'='*80}\n")
+        if raw_test_output:
+            file.write(f"\n{'='*80}\nFULL TEST OUTPUT:\n{'='*80}\n")
+            file.write(raw_test_output)
+            file.write(f"\n{'='*80}\n")
 
 
 def _parse_task_metadata_from_prompt(prompt_text: str) -> tuple[str, str]:
@@ -193,6 +256,31 @@ def _parse_skip_answer_junit(junit_path: Path) -> tuple[bool, bool]:
             test_03_skipped = True
 
     return test_05_failed, test_03_skipped
+
+
+def _parse_skip_answer_raw_output(raw_output: str) -> tuple[bool, bool]:
+    test_05_failed = bool(
+        re.search(r"FAILED\s+tests/.*/test_05_check\.py::", raw_output)
+        or re.search(r"test_05_check\.py::[^\n]*\sFAILED\b", raw_output)
+    )
+    test_03_skipped = bool(
+        re.search(r"test_03_answer\.py::[^\n]*\sSKIPPED\b", raw_output)
+        or re.search(r"SKIPPED\s*\([^)]*answer[^)]*\)", raw_output)
+    )
+    return test_05_failed, test_03_skipped
+
+
+def _detect_skip_answer_outcome(junit_path: Path, raw_output: str) -> tuple[bool, bool]:
+    junit_test_05_failed = False
+    junit_test_03_skipped = False
+    if junit_path.exists():
+        try:
+            junit_test_05_failed, junit_test_03_skipped = _parse_skip_answer_junit(junit_path)
+        except Exception as exc:
+            logging.warning(f"Failed to parse skip-answer junit XML, falling back to raw output: {exc}")
+
+    raw_test_05_failed, raw_test_03_skipped = _parse_skip_answer_raw_output(raw_output)
+    return junit_test_05_failed or raw_test_05_failed, junit_test_03_skipped or raw_test_03_skipped
 
 
 @executor(id="initialize_retry")
@@ -573,10 +661,7 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
         result = run_pytest_command(pytest_command)
         
         raw_output = result.get("details", [""])[0] if result.get("details") else ""
-        try:
-            test_05_failed, test_03_skipped = _parse_skip_answer_junit(junit_path)
-        except Exception as exc:
-            raise RuntimeError(f"Failed to parse skip-answer junit XML: {exc}") from exc
+        test_05_failed, test_03_skipped = _detect_skip_answer_outcome(junit_path, raw_output)
         
         logging.info(f"test_03_answer.py skipped: {test_03_skipped}")
         logging.info(f"test_05_check.py failed: {test_05_failed}")
@@ -637,6 +722,41 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
     if combined.should_keep:
         await ctx.yield_output(f"🏁 Workflow complete: Task {combined.test.task_id} successfully generated")
     else:
+        try:
+            run_k8s_preflight_check()
+        except K8sConnectivityError as exc:
+            logging.error(
+                "Kubernetes connectivity failed before moving %s to unsuccessful: %s",
+                combined.test.task_id,
+                exc,
+            )
+            quarantine_dir = _environment_failed_game_root()
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            task_path = PATHS.game_root / combined.test.task_id
+            quarantine_task_path = _destination_task_path(quarantine_dir, combined.test.task_id)
+            raw_test_output = ""
+            val = ctx.get_state(f"raw_output_{combined.test.task_id}", _MISSING)
+            if val is not _MISSING:
+                raw_test_output = val
+            elif combined.test.raw_output:
+                raw_test_output = combined.test.raw_output
+
+            if task_path.exists():
+                shutil.move(str(task_path), str(quarantine_task_path))
+                logging.info(f"Moved task to environment_failed quarantine: {quarantine_task_path}")
+                _write_environment_failure_report(
+                    combined=combined,
+                    destination_dir=quarantine_task_path,
+                    raw_test_output=raw_test_output,
+                    connectivity_error=exc,
+                )
+
+            raise QuarantinedTaskError(
+                task_id=combined.test.task_id,
+                quarantine_path=quarantine_task_path,
+                cause=exc,
+            ) from exc
+
         # Move task to unsuccessful folder only after all retries exhausted
         logging.info(f"\n[STEP] ❌ Moving task to unsuccessful folder after {combined.retry_count} failed attempts: {combined.test.task_id}")
         
@@ -644,14 +764,9 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
         unsuccessful_dir.mkdir(parents=True, exist_ok=True)
         
         task_path = PATHS.game_root / combined.test.task_id
-        unsuccessful_task_path = unsuccessful_dir / combined.test.task_id
+        unsuccessful_task_path = _destination_task_path(unsuccessful_dir, combined.test.task_id)
         
         if task_path.exists():
-            if unsuccessful_task_path.exists():
-                import time
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                unsuccessful_task_path = unsuccessful_dir / f"{combined.test.task_id}_{timestamp}"
-            
             shutil.move(str(task_path), str(unsuccessful_task_path))
             logging.info(f"Moved task to: {unsuccessful_task_path}")
             
@@ -673,15 +788,9 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
                 raw_test_output = combined.test.raw_output
             
             # Read session.json if it exists
-            session_json_content = ""
-            session_json_path = unsuccessful_task_path / "session.json"
-            if session_json_path.exists():
-                try:
-                    with open(session_json_path, 'r') as sf:
-                        session_json_content = sf.read()
-                    logging.info(f"✅ Read session.json: {len(session_json_content)} chars")
-                except Exception as e:
-                    logging.warning(f"⚠️  Could not read session.json: {e}")
+            session_json_content = _read_session_json(unsuccessful_task_path)
+            if session_json_content:
+                logging.info(f"✅ Read session.json: {len(session_json_content)} chars")
             
             with open(failure_report_path, 'w') as f:
                 f.write(f"Task ID: {combined.test.task_id}\n")

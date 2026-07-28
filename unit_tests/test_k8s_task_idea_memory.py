@@ -138,3 +138,26 @@ def test_memory_build_constraints_blocks():
             p = Path(__file__).resolve().parents[1] / rel
             if p.exists():
                 p.unlink()
+
+
+def test_task_ideas_memory_remove_concept_updates_both_stores():
+    suffix = uuid.uuid4().hex
+    memory_file = f"tests/.tmp_memory_{suffix}.json"
+    failure_file = f"tests/.tmp_failure_{suffix}.json"
+    try:
+        memory = TaskIdeasMemory(memory_file=memory_file, failure_memory_file=failure_file)
+        concept = _concept("Leases")
+        memory._save_ideas = lambda: None
+        memory._save_failures = lambda: None
+        memory.add_structured_concept(concept)
+        memory.add_failed_concept(concept, reason="boom")
+
+        memory.remove_concept("Leases")
+
+        assert memory.generated_ideas == {}
+        assert memory.failed_concepts == {}
+    finally:
+        for rel in [memory_file, failure_file]:
+            p = Path(__file__).resolve().parents[1] / rel
+            if p.exists():
+                p.unlink()

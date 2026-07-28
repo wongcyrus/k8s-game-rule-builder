@@ -1,4 +1,5 @@
 import workflow.runner as runner
+from workflow.preflight import QuarantinedTaskError
 
 
 class _ProcResult:
@@ -100,6 +101,7 @@ def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
     monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(
         runner,
@@ -185,6 +187,7 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
     monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(
         runner,
@@ -206,3 +209,177 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
     mem = memory_holder["mem"]
     assert "statefulsets" in mem.failed_concepts
     assert mem.saved_failures > 0
+
+
+def test_run_workflow_runs_preflight_once(monkeypatch, tmp_path):
+    class FakeMCP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeWorkflow:
+        def run(self, _state, stream=True):
+            async def _gen():
+                yield type("Evt", (), {"type": "output", "data": "successfully generated"})
+            return _gen()
+
+    class FakeMemory:
+        generated_ideas = {}
+        failed_concepts = {}
+
+        def add_structured_concept(self, _concept):
+            return None
+
+        def add_failed_concept(self, _concept, reason):
+            raise AssertionError(reason)
+
+        def remove_concept(self, _concept):
+            return None
+
+    class _Var:
+        task_id = "099_demo"
+        difficulty = "BEGINNER"
+        objective = "obj"
+
+    class _Concept:
+        concept = "Pods"
+        description = "desc"
+        tags = ["workloads"]
+        variations = [_Var()]
+
+    preflight_calls = []
+
+    async def fake_create_idea_agent_with_mcp(_tool):
+        return object(), FakeMemory()
+
+    async def fake_generate_task_idea(_agent, _memory):
+        return _Concept()
+
+    async def fake_build_workflow(_tool):
+        return FakeWorkflow(), object(), object()
+
+    monkeypatch.setattr(runner, "MCPStdioTool", FakeMCP)
+    monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
+    monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
+    monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: preflight_calls.append("ok") or "namespace/default")
+    monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
+    monkeypatch.setattr(
+        runner,
+        "PATHS",
+        type(
+            "P",
+            (),
+            {
+                "k8s_docs_root": tmp_path / "docs",
+                "tests_root": tmp_path / "tests",
+                "game_root": tmp_path / "tests/game02",
+            },
+        )(),
+    )
+
+    import asyncio
+
+    asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=2)))
+    assert preflight_calls == ["ok"]
+
+
+def test_run_workflow_quarantine_stops_without_failure_memory(monkeypatch, tmp_path):
+    class FakeMCP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    class FakeWorkflow:
+        def run(self, _state, stream=True):
+            async def _gen():
+                raise QuarantinedTaskError(
+                    task_id="100_demo",
+                    quarantine_path=tmp_path / "environment_failed/game02/100_demo",
+                    cause=runner.K8sConnectivityError("k8s down"),
+                )
+                yield  # pragma: no cover
+            return _gen()
+
+    class FakeMemory:
+        def __init__(self):
+            self.generated_ideas = {}
+            self.failed_concepts = {}
+            self.removed = []
+            self.saved_failures = 0
+
+        def add_structured_concept(self, concept):
+            self.generated_ideas[concept.concept.lower()] = {"concept": concept.concept}
+
+        def add_failed_concept(self, concept, reason):
+            self.saved_failures += 1
+            self.failed_concepts[concept.concept.lower()] = {"concept": concept.concept, "reason": reason}
+
+        def remove_concept(self, concept):
+            self.removed.append(concept)
+
+    class _Var:
+        task_id = "100_demo"
+        difficulty = "BEGINNER"
+        objective = "obj"
+
+    class _Concept:
+        concept = "Ingress"
+        description = "desc"
+        tags = ["networking"]
+        variations = [_Var()]
+
+    memory_holder = {}
+
+    async def fake_create_idea_agent_with_mcp(_tool):
+        mem = FakeMemory()
+        memory_holder["mem"] = mem
+        return object(), mem
+
+    async def fake_generate_task_idea(_agent, _memory):
+        return _Concept()
+
+    async def fake_build_workflow(_tool):
+        return FakeWorkflow(), object(), object()
+
+    monkeypatch.setattr(runner, "MCPStdioTool", FakeMCP)
+    monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
+    monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
+    monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
+    monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
+    monkeypatch.setattr(
+        runner,
+        "PATHS",
+        type(
+            "P",
+            (),
+            {
+                "k8s_docs_root": tmp_path / "docs",
+                "tests_root": tmp_path / "tests",
+                "game_root": tmp_path / "tests/game02",
+            },
+        )(),
+    )
+
+    import asyncio
+    import pytest
+
+    with pytest.raises(QuarantinedTaskError):
+        asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=1)))
+
+    mem = memory_holder["mem"]
+    assert mem.removed == ["Ingress"]
+    assert mem.saved_failures == 0

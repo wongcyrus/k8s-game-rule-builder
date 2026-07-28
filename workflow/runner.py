@@ -16,6 +16,11 @@ from agents.k8s_task_idea_agent import create_idea_agent_with_mcp
 from workflow.idea_generator import generate_task_idea
 from workflow.builder import build_workflow
 from workflow.models import InitialWorkflowState
+from workflow.preflight import (
+    K8sConnectivityError,
+    QuarantinedTaskError,
+    run_k8s_preflight_check,
+)
 
 
 logging.basicConfig(
@@ -136,6 +141,10 @@ async def run_workflow(config: WorkflowRuntimeConfig | None = None):
         for iteration in range(num_iterations):
             logging.info(f"\n[ITERATION {iteration + 1}/{num_iterations}] Starting task generation...")
             reset_minikube(iteration, config)
+            if iteration == 0:
+                logging.info("[PREFLIGHT] Verifying Kubernetes connectivity before task generation...")
+                preflight_output = run_k8s_preflight_check()
+                logging.info("[PREFLIGHT] Kubernetes connectivity OK:\n%s", preflight_output)
 
             # Create a new agent and workflow for each iteration
             idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
@@ -198,11 +207,18 @@ async def run_workflow(config: WorkflowRuntimeConfig | None = None):
             workflow_succeeded = False
 
             # Run workflow fresh so each retry recreates agents and Azure OpenAI clients
-            async for event in workflow.run(initial_state, stream=True):
-                if event.type == "output":
-                    if event.data and isinstance(event.data, str) and event.data.strip():
-                        if "successfully generated" in event.data:
-                            workflow_succeeded = True
+            try:
+                async for event in workflow.run(initial_state, stream=True):
+                    if event.type == "output":
+                        if event.data and isinstance(event.data, str) and event.data.strip():
+                            if "successfully generated" in event.data:
+                                workflow_succeeded = True
+            except QuarantinedTaskError:
+                idea_memory.remove_concept(concept.concept)
+                raise
+            except K8sConnectivityError:
+                idea_memory.remove_concept(concept.concept)
+                raise
 
             # Update memory based on workflow outcome
             if workflow_succeeded:

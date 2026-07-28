@@ -2,12 +2,15 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import workflow.executors as executors
 from workflow.models import (
     CombinedValidationResult,
     TestResult as WorkflowTestResult,
     ValidationResult,
 )
+from workflow.preflight import K8sConnectivityError, QuarantinedTaskError
 
 
 class _FakeCtx:
@@ -101,7 +104,6 @@ def test_make_decision_requires_validation_state():
         task_id="052_demo",
         task_directory="tests/game02/052_demo",
     )
-    import pytest
     with pytest.raises(ValueError, match="Missing validation state"):
         _call_executor(executors.make_decision, test_result, ctx)
 
@@ -178,6 +180,7 @@ def test_complete_workflow_failure_moves_task_and_writes_report(monkeypatch, tmp
         "PATHS",
         SimpleNamespace(game_root=game_root, unsuccessful_game_root=unsuccessful_root),
     )
+    monkeypatch.setattr(executors, "run_k8s_preflight_check", lambda: "namespace/default")
 
     ctx = _FakeCtx()
     ctx.set_state("failure_reasons_055_demo", ["Validation failed: bad yaml"])
@@ -278,8 +281,6 @@ def test_retry_generation_requires_metadata():
         concept_description="",
     )
 
-    import pytest
-
     with pytest.raises(ValueError, match="Missing task metadata"):
         _call_executor(executors.retry_generation, bad, ctx)
 
@@ -294,8 +295,6 @@ def test_fix_task_requires_metadata():
         target_topic="",
         concept_description="",
     )
-
-    import pytest
 
     with pytest.raises(ValueError, match="Missing task metadata"):
         _call_executor(executors.fix_task, bad, ctx)
@@ -355,6 +354,27 @@ def test_parse_skip_answer_junit_detects_failed_and_skipped(tmp_path: Path):
     assert test_03_skipped is True
 
 
+def test_parse_skip_answer_raw_output_detects_failed_and_skipped():
+    raw_output = """
+tests/game02/123_demo/test_03_answer.py::test_answer SKIPPED (Skip Answer)
+FAILED tests/game02/123_demo/test_05_check.py::TestCheck::test_001_check
+"""
+    test_05_failed, test_03_skipped = executors._parse_skip_answer_raw_output(raw_output)
+    assert test_05_failed is True
+    assert test_03_skipped is True
+
+
+def test_detect_skip_answer_outcome_falls_back_to_raw_output(tmp_path: Path):
+    raw_output = """
+tests/game02/123_demo/test_03_answer.py::test_answer SKIPPED (Skip Answer)
+FAILED tests/game02/123_demo/test_05_check.py::TestCheck::test_001_check
+"""
+    missing = tmp_path / "missing.xml"
+    test_05_failed, test_03_skipped = executors._detect_skip_answer_outcome(missing, raw_output)
+    assert test_05_failed is True
+    assert test_03_skipped is True
+
+
 def test_initialize_retry_unknown_dict_and_existing_state(monkeypatch, tmp_path: Path):
     fake_paths = SimpleNamespace(game_root=tmp_path / "tests/game02")
     monkeypatch.setattr(executors, "PATHS", fake_paths)
@@ -363,7 +383,6 @@ def test_initialize_retry_unknown_dict_and_existing_state(monkeypatch, tmp_path:
     ctx.set_state("target_topic", "Pods")
 
     payload = {"unexpected": 1}
-    import pytest
     with pytest.raises(ValueError, match="Unsupported dict message shape"):
         _call_executor(executors.initialize_retry, payload, ctx)
 
@@ -374,8 +393,6 @@ def test_parse_generated_task_raises_when_no_id(monkeypatch, tmp_path: Path):
     ctx.set_state("retry_count", 0)
     ctx.set_state("max_retries", 3)
     response = SimpleNamespace(agent_response=SimpleNamespace(text="no task id here"))
-
-    import pytest
 
     with pytest.raises(ValueError, match="Failed to parse task ID"):
         _call_executor(executors.parse_generated_task, response, ctx)
@@ -456,6 +473,7 @@ def test_complete_workflow_uses_default_reasons_and_timestamp_on_collision(monke
         "PATHS",
         SimpleNamespace(game_root=game_root, unsuccessful_game_root=unsuccessful_root),
     )
+    monkeypatch.setattr(executors, "run_k8s_preflight_check", lambda: "namespace/default")
 
     import time
     monkeypatch.setattr(time, "strftime", lambda _fmt: "20260101_000000")
@@ -467,3 +485,37 @@ def test_complete_workflow_uses_default_reasons_and_timestamp_on_collision(monke
 
     moved_dir = unsuccessful_root / f"{task_id}_20260101_000000"
     assert moved_dir.exists()
+
+
+def test_complete_workflow_quarantines_task_on_k8s_failure(monkeypatch, tmp_path: Path):
+    game_root = tmp_path / "tests/game02"
+    unsuccessful_root = tmp_path / "unsuccessful/game02"
+    task_id = "075_demo"
+    task_dir = game_root / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "session.json").write_text('{"namespace":"x"}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        executors,
+        "PATHS",
+        SimpleNamespace(game_root=game_root, unsuccessful_game_root=unsuccessful_root),
+    )
+    monkeypatch.setattr(
+        executors,
+        "run_k8s_preflight_check",
+        lambda: (_ for _ in ()).throw(K8sConnectivityError("k8s down", "kubectl get namespaces", "boom")),
+    )
+
+    ctx = _FakeCtx()
+    ctx.set_state("raw_output_075_demo", "pytest output")
+    combined = _combined(task_id=task_id, retry_count=3, max_retries=3)
+
+    with pytest.raises(QuarantinedTaskError):
+        _call_executor(executors.complete_workflow, combined, ctx)
+
+    quarantined_dir = tmp_path / "environment_failed/game02" / task_id
+    assert quarantined_dir.exists()
+    report = (quarantined_dir / "ENVIRONMENT_FAILURE_REPORT.txt").read_text(encoding="utf-8")
+    assert "Kubernetes environment failure" in report
+    assert "kubectl get namespaces" in report
+    assert not (unsuccessful_root / task_id).exists()

@@ -106,13 +106,19 @@ def run_pytest_command(command: str) -> dict[str, Any]:
     
     if result.returncode == 0:
         logging.info(combined_output)
-        return _result(True, "All tests passed", details=[combined_output])
+        payload = _result(True, "All tests passed", details=[combined_output])
+        payload["returncode"] = result.returncode
+        return payload
     elif result.returncode == 5:
         logging.warning(combined_output)
-        return _result(False, "No tests collected", details=[combined_output])
+        payload = _result(False, "No tests collected", details=[combined_output])
+        payload["returncode"] = result.returncode
+        return payload
     else:
         logging.error(combined_output)
-        return _result(False, f"Tests failed (exit code {result.returncode})", details=[combined_output])
+        payload = _result(False, f"Tests failed (exit code {result.returncode})", details=[combined_output])
+        payload["returncode"] = result.returncode
+        return payload
 
 
 def get_pytest_runner():
