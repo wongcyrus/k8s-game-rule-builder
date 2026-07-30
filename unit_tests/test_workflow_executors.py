@@ -165,6 +165,33 @@ def test_run_pytest_skip_answer_marks_failure_when_check_does_not_fail(monkeypat
     assert updated.test.is_valid is False
     assert updated.retry_count == 1
     assert "failure_reasons_054_demo" in ctx.state
+    assert "test_05_check.py did not fail" in updated.test.reason
+
+
+def test_run_pytest_skip_answer_marks_failure_when_answer_was_not_skipped(monkeypatch):
+    ctx = _FakeCtx()
+    combined = _combined(task_id="054b_demo", retry_count=0, max_retries=2)
+
+    import agents.pytest_runner as pytest_runner
+
+    monkeypatch.setattr(
+        pytest_runner,
+        "run_pytest_command",
+        lambda _cmd: {
+            "is_valid": False,
+            "reason": "check failed",
+            "details": ["test_05_check.py FAILED"],
+        },
+    )
+    monkeypatch.setattr(executors, "_parse_skip_answer_junit", lambda _path: (True, False))
+
+    _call_executor(executors.run_pytest_skip_answer, combined, ctx)
+
+    updated = ctx.sent[0]
+    assert updated.test.is_valid is False
+    assert updated.retry_count == 1
+    assert "test_03_answer.py was not skipped" in updated.test.reason
+    assert "failure_reasons_054b_demo" in ctx.state
 
 
 def test_complete_workflow_failure_moves_task_and_writes_report(monkeypatch, tmp_path: Path):
@@ -320,6 +347,7 @@ def test_run_pytest_skip_answer_success_path_restores_env(monkeypatch):
     monkeypatch.setattr(executors, "_parse_skip_answer_junit", lambda _path: (True, True))
     _call_executor(executors.run_pytest_skip_answer, combined, ctx)
 
+    assert ctx.sent[0] is combined
     assert ctx.sent[0].test.task_id == "066_demo"
     assert os.environ["SKIP_ANSWER_TESTS"] == "old"
 

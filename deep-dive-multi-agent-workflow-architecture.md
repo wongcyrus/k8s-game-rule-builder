@@ -156,14 +156,12 @@ Why this exists: defines canonical "correct cluster state" that graders must det
 ```python
 import json
 import time
-from tests.helper.kubectrl_helper import build_kube_config, run_kubectl_command
+from tests.helper.kubectrl_helper import build_kube_config_from_input, run_kubectl_command
 
 
 class TestReady:
     def test_001_namespace_active(self, json_input):
-        kube_config = build_kube_config(
-            json_input["cert_file"], json_input["key_file"], json_input["host"]
-        )
+        kube_config = build_kube_config_from_input(json_input)
         time.sleep(2)
         result = run_kubectl_command(
             kube_config,
@@ -179,30 +177,29 @@ Why this matters: validates setup-stage readiness only. It should not check answ
 
 ```python
 import json
-from tests.helper.kubectrl_helper import build_kube_config, run_kubectl_command
+import pytest
+from tests.helper.kubectrl_helper import build_kube_config_from_input, run_kubectl_command
 
 
 class TestCheck:
+    def _get_json(self, kube_config, command):
+        result = run_kubectl_command(kube_config, command)
+        return json.loads(result)
+
     def test_001_configmap_key_exists(self, json_input):
-        kube_config = build_kube_config(
-            json_input["cert_file"], json_input["key_file"], json_input["host"]
-        )
-        result = run_kubectl_command(
+        kube_config = build_kube_config_from_input(json_input)
+        data = self._get_json(
             kube_config,
             f"kubectl get configmap {json_input['configmap_name']} -n {json_input['namespace']} -o json",
         )
-        data = json.loads(result)
         assert data["data"][json_input["env_key"]] == json_input["env_value"]
 
     def test_002_deployment_uses_configmap_env(self, json_input):
-        kube_config = build_kube_config(
-            json_input["cert_file"], json_input["key_file"], json_input["host"]
-        )
-        result = run_kubectl_command(
+        kube_config = build_kube_config_from_input(json_input)
+        data = self._get_json(
             kube_config,
             f"kubectl get deployment {json_input['deployment_name']} -n {json_input['namespace']} -o json",
         )
-        data = json.loads(result)
         env = data["spec"]["template"]["spec"]["containers"][0].get("env", [])
         matched = [
             e for e in env
@@ -211,6 +208,15 @@ class TestCheck:
             and e.get("valueFrom", {}).get("configMapKeyRef", {}).get("key") == json_input["env_key"]
         ]
         assert matched, "Deployment container must consume env var from ConfigMap key"
+
+    def test_999_optional_gateway_api_check(self, json_input):
+        kube_config = build_kube_config_from_input(json_input)
+        resources = run_kubectl_command(
+            kube_config,
+            "kubectl api-resources --api-group=gateway.networking.k8s.io -o name",
+        )
+        if "gateways.gateway.networking.k8s.io" not in resources.splitlines():
+            pytest.skip("Gateway API CRDs are not installed on this cluster")
 ```
 
 Why this matters: this is the real grading logic. If a student deploys wrong resource wiring, this test fails with explicit reason.

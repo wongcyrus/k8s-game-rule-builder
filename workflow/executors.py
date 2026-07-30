@@ -283,6 +283,20 @@ def _detect_skip_answer_outcome(junit_path: Path, raw_output: str) -> tuple[bool
     return junit_test_05_failed or raw_test_05_failed, junit_test_03_skipped or raw_test_03_skipped
 
 
+def _skip_answer_failure_reason(*, test_03_skipped: bool, test_05_failed: bool) -> str:
+    missing_expectations: list[str] = []
+    if not test_03_skipped:
+        missing_expectations.append("test_03_answer.py was not skipped")
+    if not test_05_failed:
+        missing_expectations.append("test_05_check.py did not fail")
+
+    return (
+        "skip-answer validation failed: "
+        + ", ".join(missing_expectations)
+        + " when SKIP_ANSWER_TESTS=True"
+    )
+
+
 @executor(id="initialize_retry")
 async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialWorkflowState, ctx: WorkflowContext[AgentExecutorRequest]) -> None:
     """Initialize or re-initialize shared state before generation."""
@@ -666,17 +680,22 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
         logging.info(f"test_03_answer.py skipped: {test_03_skipped}")
         logging.info(f"test_05_check.py failed: {test_05_failed}")
         
-        # Validation passes if test_05_check.py failed (as expected when answer is not deployed)
-        if test_05_failed:
-            logging.info("✅ Validation passed: test_05_check.py failed as expected when answer is skipped")
+        if test_03_skipped and test_05_failed:
+            logging.info(
+                "✅ Validation passed: test_03_answer.py was skipped and test_05_check.py failed as expected"
+            )
             await ctx.send_message(combined)
         else:
-            logging.error("❌ Validation failed: test_05_check.py should fail when SKIP_ANSWER_TESTS=True")
+            failure_reason = _skip_answer_failure_reason(
+                test_03_skipped=test_03_skipped,
+                test_05_failed=test_05_failed,
+            )
+            logging.error("❌ Validation failed: %s", failure_reason)
             
             # Create new test result with failure
             new_test_result = TestResult(
                 is_valid=False,
-                reason="test_05_check.py did not fail when answer was skipped (SKIP_ANSWER_TESTS=True)",
+                reason=failure_reason,
                 task_id=combined.test.task_id,
                 task_directory=combined.test.task_directory,
                 raw_output=raw_output

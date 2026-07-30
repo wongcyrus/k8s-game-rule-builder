@@ -99,6 +99,10 @@ K8S_RULE_K8S_DOCS_ROOT="/path/to/k8s-docs/concepts"
 K8S_RULE_UNSUCCESSFUL_ROOT="/path/to/k8s-game-rule/unsuccessful"
 ```
 
+The workflow's Kubernetes preflight uses `k8s-configure/config.yaml` as the authoritative
+kubeconfig. Minikube reset is only performed when that kubeconfig points at a local
+endpoint such as `localhost`, `127.*`, or `192.168.49.*`.
+
 ### Workflow Tuning
 
 Use CLI flags instead of editing code:
@@ -214,6 +218,11 @@ Each iteration:
 **No LLM for validation/testing**: Validation and test execution are deterministic operations. Using pure Python functions is faster, cheaper, and more reliable than routing through an LLM.
 
 **Skip-answer validation**: After tests pass, an extra step runs pytest with `SKIP_ANSWER_TESTS=True` to confirm that `test_05_check.py` correctly fails when the answer isn't deployed. This catches tests that would pass regardless of the student's answer.
+
+**Cluster-aware test guidance**: Generator and fixer prompts now steer task tests toward
+`build_kube_config_from_input(json_input)` and require optional CRD/controller features to
+be probed first so unsupported APIs can `pytest.skip` cleanly instead of failing with
+cluster-specific errors.
 
 **Dual API support**: The `AzureOpenAI` config detects codex models and automatically uses the Responses API. Other models use Chat Completions. The `ResponsesAgent` class handles the Responses API tool-call loop manually.
 

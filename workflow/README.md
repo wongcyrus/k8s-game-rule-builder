@@ -77,6 +77,7 @@ Defaults:
 - `--max-retries 3`
 - minikube reset follows the endpoint in `k8s-configure/config.yaml` (`localhost`/`127.*`/`192.168.49.*` resets minikube; remote clusters are left untouched)
 - delete timeout `120s`, start timeout `300s`
+- Kubernetes preflight uses that same `k8s-configure/config.yaml` directly as the authoritative kubeconfig
 
 Runtime stop behavior:
 - press `Ctrl+C` once to finish the current task cleanly, then exit before the next task
@@ -148,3 +149,4 @@ asyncio.run(run_workflow())
 - **K8s Preflight Gate**: Verifies Kubernetes connectivity once before any task generation begins
 - **Environment Quarantine**: Isolates tasks into `environment_failed/` without touching memory when the cluster breaks mid-run
 - **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True` using JUnit XML result parsing
+- **Cluster-Aware Test Prompts**: Agent instructions now prefer `build_kube_config_from_input(json_input)` and skip optional CRD/controller checks when the API is not installed

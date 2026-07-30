@@ -85,6 +85,20 @@ def test_fixer_agent_factory_chat_completions_branch(monkeypatch):
     assert "FIX existing failed tasks" in agent.kwargs["instructions"]
 
 
+def test_generator_instructions_use_new_helper_pattern():
+    instructions = generator_agent._get_generator_instructions()
+    assert "build_kube_config_from_input(json_input)" in instructions
+    assert "pytest.skip" in instructions
+    assert "build_kube_config(json_input['cert_file'], json_input['key_file'], json_input['host'])" not in instructions
+
+
+def test_fixer_instructions_use_new_helper_pattern():
+    instructions = fixer_agent._get_fixer_instructions()
+    assert "build_kube_config_from_input(json_input)" in instructions
+    assert "pytest.skip" in instructions
+    assert "build_kube_config(json_input['cert_file'], json_input['key_file'], json_input['host'])" not in instructions
+
+
 def test_idea_agent_factory_chat_completions_branch(monkeypatch):
     monkeypatch.setattr(idea_agent, "OpenAIChatCompletionClient", _FakeChatClient)
     monkeypatch.setattr(
