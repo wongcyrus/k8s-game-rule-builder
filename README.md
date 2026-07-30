@@ -112,6 +112,10 @@ python workflow.py \
   --minikube-start-timeout 300
 ```
 
+Press `Ctrl+C` once to request a graceful stop: the workflow finishes the current task
+(including any retries, failure handling, or quarantine bookkeeping) and exits before
+starting the next task. Press `Ctrl+C` a second time to abort immediately.
+
 ## Usage
 
 ### Running the Workflow
@@ -121,6 +125,10 @@ source .venv/bin/activate
 
 # Run the full workflow (generates up to 80 tasks with retry loop)
 python workflow.py
+
+# Stop gracefully after the current task finishes
+# 1st Ctrl+C: finish current task, then exit
+# 2nd Ctrl+C: abort immediately
 
 # Launch DevUI (interactive browser UI)
 ./launch_devui.sh

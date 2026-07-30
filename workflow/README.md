@@ -75,8 +75,13 @@ python workflow.py \
 Defaults:
 - `--iterations 80`
 - `--max-retries 3`
-- minikube reset enabled per iteration
+- minikube reset follows the endpoint in `k8s-configure/config.yaml` (`localhost`/`127.*`/`192.168.49.*` resets minikube; remote clusters are left untouched)
 - delete timeout `120s`, start timeout `300s`
+
+Runtime stop behavior:
+- press `Ctrl+C` once to finish the current task cleanly, then exit before the next task
+- the current task still runs through validation, fixer retries, success/failure memory updates, and quarantine handling
+- press `Ctrl+C` again to abort immediately
 
 ## Related Components
 

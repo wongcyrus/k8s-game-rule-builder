@@ -8,6 +8,19 @@ class _ProcResult:
         self.stderr = stderr
 
 
+class _FakeStopController:
+    def __init__(self, requested=False):
+        self.stop_requested = requested
+        self.installed = False
+        self.restored = False
+
+    def install_signal_handlers(self):
+        self.installed = True
+
+    def restore_signal_handlers(self):
+        self.restored = True
+
+
 def test_reset_minikube_runs_delete_then_start(monkeypatch):
     calls = []
 
@@ -45,6 +58,17 @@ def test_reset_minikube_skip_mode(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args) or _ProcResult())
     cfg = runner.WorkflowRuntimeConfig(reset_minikube=False)
     runner.reset_minikube(0, cfg)
+    assert calls == []
+
+
+def test_reset_minikube_skips_authoritative_kubeconfig(monkeypatch):
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args) or _ProcResult())
+    runner.reset_minikube(
+        0,
+        runner.WorkflowRuntimeConfig(),
+        k8s_configuration=type("Cfg", (), {"endpoint": "https://eks"})(),
+    )
     assert calls == []
 
 
@@ -100,7 +124,12 @@ def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
-    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "resolve_k8s_configuration",
+        lambda: type("Cfg", (), {"endpoint": "https://localhost:8443"})(),
+    )
     monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(
@@ -119,7 +148,10 @@ def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
 
     import asyncio
 
-    asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=1)))
+    stop_controller = _FakeStopController()
+    asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=1), stop_controller=stop_controller))
+    assert stop_controller.installed is True
+    assert stop_controller.restored is True
 
 
 def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
@@ -186,7 +218,12 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
-    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "resolve_k8s_configuration",
+        lambda: type("Cfg", (), {"endpoint": "https://localhost:8443"})(),
+    )
     monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(
@@ -267,7 +304,12 @@ def test_run_workflow_runs_preflight_once(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
-    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "resolve_k8s_configuration",
+        lambda: type("Cfg", (), {"endpoint": "https://localhost:8443"})(),
+    )
     monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: preflight_calls.append("ok") or "namespace/default")
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(
@@ -288,6 +330,152 @@ def test_run_workflow_runs_preflight_once(monkeypatch, tmp_path):
 
     asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=2)))
     assert preflight_calls == ["ok"]
+
+
+def test_run_workflow_stops_after_current_task_when_stop_requested(monkeypatch, tmp_path):
+    class FakeMCP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    stop_controller = _FakeStopController()
+    create_calls = []
+
+    class FakeWorkflow:
+        def run(self, _state, stream=True):
+            async def _gen():
+                stop_controller.stop_requested = True
+                yield type("Evt", (), {"type": "output", "data": "successfully generated"})
+            return _gen()
+
+    class FakeMemory:
+        def __init__(self):
+            self.generated_ideas = {}
+            self.failed_concepts = {}
+
+        def add_structured_concept(self, concept):
+            self.generated_ideas[concept.concept.lower()] = {"concept": concept.concept}
+
+        def add_failed_concept(self, concept, reason):
+            self.failed_concepts[concept.concept.lower()] = {"concept": concept.concept, "reason": reason}
+
+    class _Var:
+        task_id = "101_demo"
+        difficulty = "BEGINNER"
+        objective = "obj"
+
+    class _Concept:
+        concept = "Jobs"
+        description = "desc"
+        tags = ["batch"]
+        variations = [_Var()]
+
+    async def fake_create_idea_agent_with_mcp(_tool):
+        create_calls.append("idea")
+        return object(), FakeMemory()
+
+    async def fake_generate_task_idea(_agent, _memory):
+        return _Concept()
+
+    async def fake_build_workflow(_tool):
+        return FakeWorkflow(), object(), object()
+
+    monkeypatch.setattr(runner, "MCPStdioTool", FakeMCP)
+    monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
+    monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
+    monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "resolve_k8s_configuration",
+        lambda: type("Cfg", (), {"endpoint": "https://localhost:8443"})(),
+    )
+    monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
+    monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
+    monkeypatch.setattr(
+        runner,
+        "PATHS",
+        type(
+            "P",
+            (),
+            {
+                "k8s_docs_root": tmp_path / "docs",
+                "tests_root": tmp_path / "tests",
+                "game_root": tmp_path / "tests/game02",
+            },
+        )(),
+    )
+
+    import asyncio
+
+    asyncio.run(
+        runner.run_workflow(
+            runner.WorkflowRuntimeConfig(iterations=3),
+            stop_controller=stop_controller,
+        )
+    )
+    assert create_calls == ["idea"]
+
+
+def test_run_workflow_does_not_start_new_task_when_stop_already_requested(monkeypatch, tmp_path):
+    class FakeMCP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    stop_controller = _FakeStopController(requested=True)
+    create_calls = []
+    preflight_calls = []
+    reset_calls = []
+
+    async def fake_create_idea_agent_with_mcp(_tool):
+        create_calls.append("idea")
+        raise AssertionError("should not start new task")
+
+    monkeypatch.setattr(runner, "MCPStdioTool", FakeMCP)
+    monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config, **_kwargs: reset_calls.append("reset"))
+    monkeypatch.setattr(
+        runner,
+        "resolve_k8s_configuration",
+        lambda: type("Cfg", (), {"endpoint": "https://localhost:8443"})(),
+    )
+    monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: preflight_calls.append("ok") or "namespace/default")
+    monkeypatch.setattr(
+        runner,
+        "PATHS",
+        type(
+            "P",
+            (),
+            {
+                "k8s_docs_root": tmp_path / "docs",
+                "tests_root": tmp_path / "tests",
+                "game_root": tmp_path / "tests/game02",
+            },
+        )(),
+    )
+
+    import asyncio
+
+    asyncio.run(
+        runner.run_workflow(
+            runner.WorkflowRuntimeConfig(iterations=2, save_workflow_graph=False),
+            stop_controller=stop_controller,
+        )
+    )
+    assert create_calls == []
+    assert preflight_calls == []
+    assert reset_calls == []
 
 
 def test_run_workflow_quarantine_stops_without_failure_memory(monkeypatch, tmp_path):
@@ -357,7 +545,12 @@ def test_run_workflow_quarantine_stops_without_failure_memory(monkeypatch, tmp_p
     monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
     monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
     monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
-    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config: None)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "resolve_k8s_configuration",
+        lambda: type("Cfg", (), {"endpoint": "https://localhost:8443"})(),
+    )
     monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
     monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
     monkeypatch.setattr(

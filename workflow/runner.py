@@ -1,10 +1,12 @@
 """Main workflow runner."""
 import asyncio
-import logging
-import importlib
 import argparse
+import importlib
+import logging
+import signal
 import sys
 from dataclasses import dataclass
+from threading import current_thread, main_thread
 
 from agent_framework import (
     MCPStdioTool,
@@ -19,7 +21,9 @@ from workflow.models import InitialWorkflowState
 from workflow.preflight import (
     K8sConnectivityError,
     QuarantinedTaskError,
+    resolve_k8s_configuration,
     run_k8s_preflight_check,
+    should_manage_minikube,
 )
 
 
@@ -41,6 +45,48 @@ class WorkflowRuntimeConfig:
     minikube_start_timeout: int = 300
     max_retries: int = 3
     save_workflow_graph: bool = True
+
+
+class GracefulStopController:
+    """Handle task-level graceful shutdown for the workflow runner."""
+
+    def __init__(self) -> None:
+        self._stop_requested = False
+        self._signal_count = 0
+        self._restore_handlers: list[tuple[int, signal.Handlers]] = []
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested
+
+    def request_stop(self, signum: int | None = None, _frame=None) -> None:
+        self._signal_count += 1
+        if self._signal_count == 1:
+            self._stop_requested = True
+            signal_name = signal.Signals(signum).name if signum is not None else "manual request"
+            logging.warning(
+                "Stop requested via %s. Finishing the current task before exiting. Press Ctrl+C again to abort immediately.",
+                signal_name,
+            )
+            return
+
+        signal_name = signal.Signals(signum).name if signum is not None else "manual request"
+        logging.warning("Received %s again. Aborting immediately.", signal_name)
+        raise KeyboardInterrupt("Forced workflow shutdown requested")
+
+    def install_signal_handlers(self) -> None:
+        if current_thread() is not main_thread():
+            return
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handler = signal.getsignal(signum)
+            signal.signal(signum, self.request_stop)
+            self._restore_handlers.append((signum, previous_handler))
+
+    def restore_signal_handlers(self) -> None:
+        while self._restore_handlers:
+            signum, previous_handler = self._restore_handlers.pop()
+            signal.signal(signum, previous_handler)
 
 
 def _build_task_prompt(*, task_id: str, target_topic: str, concept, beginner_task, existing_tasks: list[str], existing_concepts: list[str]) -> str:
@@ -65,11 +111,18 @@ def _build_task_prompt(*, task_id: str, target_topic: str, concept, beginner_tas
     )
 
 
-def reset_minikube(iteration: int, config: WorkflowRuntimeConfig):
+def reset_minikube(iteration: int, config: WorkflowRuntimeConfig, *, k8s_configuration=None):
     # Clean up minikube before each iteration
     import subprocess
     if not config.reset_minikube:
         logging.info(f"[ITERATION {iteration + 1}] Skipping minikube reset (config)")
+        return
+    if k8s_configuration is not None and not should_manage_minikube(k8s_configuration):
+        logging.info(
+            "[ITERATION %s] Skipping minikube reset for authoritative kubeconfig (%s)",
+            iteration + 1,
+            k8s_configuration.endpoint,
+        )
         return
 
     try:
@@ -108,9 +161,15 @@ def reset_minikube(iteration: int, config: WorkflowRuntimeConfig):
         logging.error(f"Error during minikube operation: {e}")
 
 
-async def run_workflow(config: WorkflowRuntimeConfig | None = None):
+async def run_workflow(
+    config: WorkflowRuntimeConfig | None = None,
+    *,
+    stop_controller: GracefulStopController | None = None,
+):
     """Run the complete K8s task generation workflow."""
     config = config or WorkflowRuntimeConfig()
+    stop_controller = stop_controller or GracefulStopController()
+    stop_controller.install_signal_handlers()
     # Force reload to pick up code changes
     if 'agents.pytest_runner' in sys.modules:
         importlib.reload(sys.modules['agents.pytest_runner'])
@@ -135,104 +194,122 @@ async def run_workflow(config: WorkflowRuntimeConfig | None = None):
         load_prompts=False
     )
     
-    async with docs_mcp_tool, tests_mcp_tool:
-        num_iterations = config.iterations
+    try:
+        async with docs_mcp_tool, tests_mcp_tool:
+            num_iterations = config.iterations
+            k8s_configuration = resolve_k8s_configuration()
 
-        for iteration in range(num_iterations):
-            logging.info(f"\n[ITERATION {iteration + 1}/{num_iterations}] Starting task generation...")
-            reset_minikube(iteration, config)
-            if iteration == 0:
-                logging.info("[PREFLIGHT] Verifying Kubernetes connectivity before task generation...")
-                preflight_output = run_k8s_preflight_check()
-                logging.info("[PREFLIGHT] Kubernetes connectivity OK:\n%s", preflight_output)
+            for iteration in range(num_iterations):
+                if stop_controller.stop_requested:
+                    logging.info(
+                        "Graceful stop requested before iteration %s. No new task will be started.",
+                        iteration + 1,
+                    )
+                    break
 
-            # Create a new agent and workflow for each iteration
-            idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
-            workflow, generator_executor, fixer_executor = await build_workflow(tests_mcp_tool)
+                logging.info(f"\n[ITERATION {iteration + 1}/{num_iterations}] Starting task generation...")
+                reset_minikube(iteration, config, k8s_configuration=k8s_configuration)
+                if iteration == 0:
+                    logging.info("[PREFLIGHT] Verifying Kubernetes connectivity before task generation...")
+                    preflight_output = run_k8s_preflight_check()
+                    logging.info("[PREFLIGHT] Kubernetes connectivity OK:\n%s", preflight_output)
 
-            # Generate workflow visualization only on first iteration
-            if iteration == 0 and config.save_workflow_graph:
-                viz = WorkflowViz(workflow)
+                # Create a new agent and workflow for each iteration
+                idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
+                workflow, generator_executor, fixer_executor = await build_workflow(tests_mcp_tool)
+
+                # Generate workflow visualization only on first iteration
+                if iteration == 0 and config.save_workflow_graph:
+                    viz = WorkflowViz(workflow)
+                    try:
+                        viz.save_png("workflow_graph.png")
+                        logging.info("Saved workflow graph to workflow_graph.png")
+                    except Exception:
+                        pass
+
+                # Step 1: Generate unique task idea
+                concept = await generate_task_idea(idea_agent, idea_memory)
+
+                beginner_task = concept.variations[0]
+                target_topic = concept.concept
+                task_id = beginner_task.task_id
+
+                # Save concept immediately so restarts won't regenerate it
+                idea_memory.add_structured_concept(concept)
+
+                # Step 2: Run workflow
+                logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
+
+                # Get existing tasks
+                game_dir = PATHS.game_root
+                existing_tasks = []
+                if game_dir.exists():
+                    existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
+
+                # Get existing concepts
+                existing_concepts = []
+                if idea_memory.generated_ideas:
+                    existing_concepts = [idea['concept'] for idea in idea_memory.generated_ideas.values()]
+
+                task_prompt = _build_task_prompt(
+                    task_id=task_id,
+                    target_topic=target_topic,
+                    concept=concept,
+                    beginner_task=beginner_task,
+                    existing_tasks=existing_tasks,
+                    existing_concepts=existing_concepts,
+                )
+
+                # Create initial state object
+                initial_state = InitialWorkflowState(
+                    prompt=task_prompt,
+                    target_topic=target_topic,
+                    task_id=task_id,
+                    concept_description=concept.description,
+                    difficulty=beginner_task.difficulty,
+                    objective=beginner_task.objective,
+                    retry_count=0,
+                    max_retries=config.max_retries
+                )
+
+                workflow_succeeded = False
+
+                # Run workflow fresh so each retry recreates agents and Azure OpenAI clients
                 try:
-                    viz.save_png("workflow_graph.png")
-                    logging.info("Saved workflow graph to workflow_graph.png")
-                except Exception:
-                    pass
+                    async for event in workflow.run(initial_state, stream=True):
+                        if event.type == "output":
+                            if event.data and isinstance(event.data, str) and event.data.strip():
+                                if "successfully generated" in event.data:
+                                    workflow_succeeded = True
+                except QuarantinedTaskError:
+                    idea_memory.remove_concept(concept.concept)
+                    raise
+                except K8sConnectivityError:
+                    idea_memory.remove_concept(concept.concept)
+                    raise
 
-            # Step 1: Generate unique task idea
-            concept = await generate_task_idea(idea_agent, idea_memory)
+                # Update memory based on workflow outcome
+                if workflow_succeeded:
+                    logging.info(f"💾 Task succeeded: {concept.concept}")
+                else:
+                    # Move from success memory to failure memory
+                    idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
+                    logging.info(f"💾 Saved concept to failure memory: {concept.concept}")
 
-            beginner_task = concept.variations[0]
-            target_topic = concept.concept
-            task_id = beginner_task.task_id
+                logging.info(f"\n[ITERATION {iteration + 1}] Complete")
 
-            # Save concept immediately so restarts won't regenerate it
-            idea_memory.add_structured_concept(concept)
+                if stop_controller.stop_requested:
+                    logging.info(
+                        "Graceful stop requested. Current task finished; stopping before iteration %s.",
+                        iteration + 2,
+                    )
+                    break
 
-            # Step 2: Run workflow
-            logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
-
-            # Get existing tasks
-            game_dir = PATHS.game_root
-            existing_tasks = []
-            if game_dir.exists():
-                existing_tasks = [d.name for d in game_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
-
-            # Get existing concepts
-            existing_concepts = []
-            if idea_memory.generated_ideas:
-                existing_concepts = [idea['concept'] for idea in idea_memory.generated_ideas.values()]
-
-            task_prompt = _build_task_prompt(
-                task_id=task_id,
-                target_topic=target_topic,
-                concept=concept,
-                beginner_task=beginner_task,
-                existing_tasks=existing_tasks,
-                existing_concepts=existing_concepts,
-            )
-
-            # Create initial state object
-            initial_state = InitialWorkflowState(
-                prompt=task_prompt,
-                target_topic=target_topic,
-                task_id=task_id,
-                concept_description=concept.description,
-                difficulty=beginner_task.difficulty,
-                objective=beginner_task.objective,
-                retry_count=0,
-                max_retries=config.max_retries
-            )
-
-            workflow_succeeded = False
-
-            # Run workflow fresh so each retry recreates agents and Azure OpenAI clients
-            try:
-                async for event in workflow.run(initial_state, stream=True):
-                    if event.type == "output":
-                        if event.data and isinstance(event.data, str) and event.data.strip():
-                            if "successfully generated" in event.data:
-                                workflow_succeeded = True
-            except QuarantinedTaskError:
-                idea_memory.remove_concept(concept.concept)
-                raise
-            except K8sConnectivityError:
-                idea_memory.remove_concept(concept.concept)
-                raise
-
-            # Update memory based on workflow outcome
-            if workflow_succeeded:
-                logging.info(f"💾 Task succeeded: {concept.concept}")
-            else:
-                # Move from success memory to failure memory
-                idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
-                logging.info(f"💾 Saved concept to failure memory: {concept.concept}")
-
-            logging.info(f"\n[ITERATION {iteration + 1}] Complete")
-
-        logging.info("\n" + "="*80)
-        logging.info("WORKFLOW COMPLETE")
-        logging.info("="*80)
+            logging.info("\n" + "="*80)
+            logging.info("WORKFLOW COMPLETE")
+            logging.info("="*80)
+    finally:
+        stop_controller.restore_signal_handlers()
 
 
 def main():
