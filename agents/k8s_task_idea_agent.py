@@ -14,6 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import asyncio
 import logging
 import json
+import os
+import tempfile
 from contextlib import asynccontextmanager
 from typing import MutableSequence, Any, Annotated
 from pydantic import BaseModel, Field
@@ -157,6 +159,24 @@ class TaskIdeasMemory:
         self._ensure_memory_file(self.failure_memory_file)
         self._load_ideas()
         self._load_failures()
+
+    @staticmethod
+    def _concept_key(concept: str) -> str:
+        return concept.replace(" ", "_").replace("*", "").lower()
+
+    @staticmethod
+    def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
+        fd, tmp_path = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
     
     def _load_ideas(self) -> None:
         """Load previously generated ideas from file."""
@@ -181,16 +201,14 @@ class TaskIdeasMemory:
     def _save_ideas(self) -> None:
         """Save current ideas to file."""
         try:
-            with open(self.memory_file, "w") as f:
-                json.dump({"ideas": self.generated_ideas}, f, indent=2)
+            self._write_json_atomically(self.memory_file, {"ideas": self.generated_ideas})
         except Exception as e:
             logging.error(f"Failed to save memory file: {e}")
 
     def _save_failures(self) -> None:
         """Save failed concepts to file."""
         try:
-            with open(self.failure_memory_file, "w") as f:
-                json.dump({"ideas": self.failed_concepts}, f, indent=2)
+            self._write_json_atomically(self.failure_memory_file, {"ideas": self.failed_concepts})
         except Exception as e:
             logging.error(f"Failed to save failure memory file: {e}")
 
@@ -206,10 +224,11 @@ class TaskIdeasMemory:
 
     def add_structured_concept(self, concept_data: K8sTaskConcept) -> None:
         """Add a structured concept to success memory."""
-        concept_key = concept_data.concept.replace(" ", "_").replace("*", "").lower()
+        concept_key = self._concept_key(concept_data.concept)
         if self.concept_exists(concept_data.concept):
             return
 
+        removed_failed = self.failed_concepts.pop(concept_key, None) is not None
         self.generated_ideas[concept_key] = {
             "concept": concept_data.concept,
             "description": concept_data.description,
@@ -218,10 +237,13 @@ class TaskIdeasMemory:
             "tags": concept_data.tags,
         }
         self._save_ideas()
+        if removed_failed:
+            self._save_failures()
 
     def add_failed_concept(self, concept_data: K8sTaskConcept, reason: str | None = None) -> None:
         """Record a concept that failed later in the workflow."""
-        concept_key = concept_data.concept.replace(" ", "_").replace("*", "").lower()
+        concept_key = self._concept_key(concept_data.concept)
+        removed_generated = self.generated_ideas.pop(concept_key, None) is not None
         self.failed_concepts[concept_key] = {
             "concept": concept_data.concept,
             "description": concept_data.description,
@@ -229,11 +251,13 @@ class TaskIdeasMemory:
             "reason": reason,
             "tags": concept_data.tags,
         }
+        if removed_generated:
+            self._save_ideas()
         self._save_failures()
 
     def remove_concept(self, concept: str) -> None:
         """Remove a concept from memory stores when the environment invalidates the run."""
-        concept_key = concept.replace(" ", "_").replace("*", "").lower()
+        concept_key = self._concept_key(concept)
         removed_generated = self.generated_ideas.pop(concept_key, None) is not None
         removed_failed = self.failed_concepts.pop(concept_key, None) is not None
         if removed_generated:

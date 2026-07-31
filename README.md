@@ -289,12 +289,89 @@ Each task is generated under `tests/<game_name>/<task_id>/`:
 
 ## Memory System
 
-The project uses two JSON files for cross-session memory:
+The project now uses three live memory files plus timestamped backups:
 
 - **`task_ideas_memory.json`** — Successfully generated concepts (prevents re-generation)
 - **`task_ideas_failure_memory.json`** — Concepts that failed validation/testing (prevents retrying known failures)
+- **`task_ideas_unresolved_memory.json`** — Concepts that could not be classified confidently from folder truth yet
+
+Automatic backups are created under:
+
+- **`memory-backups-YYYYMMDD-HHMMSS/`** — Point-in-time copies of the memory files before reconstruction writes
 
 `TaskIdeasMemory` owns all memory mutation/query methods (`add_structured_concept`, `add_failed_concept`, `concept_exists`). `TaskIdeasMemoryMiddleware` is read-only and only injects constraints into the idea agent prompt.
+
+### Memory write rules
+
+- success memory is written **only after** a workflow iteration really succeeds
+- failure memory removes any same-key success entry before saving
+- success memory removes any same-key failure entry before saving
+- JSON writes are atomic (`temp file -> fsync -> rename`) to avoid partial corruption
+
+### Folder-truth reconstruction tool
+
+The builder includes:
+
+- **`agents/task_ideas_memory_rebuilder.py`**
+
+This tool reconstructs memory from the external game repo layout:
+
+- `tests/game02`
+- `tests/game04`
+- `unsuccessful`
+
+Classification rules:
+
+- task IDs found under `tests/game02` or `tests/game04` are treated as **success-backed**
+- task IDs found under `unsuccessful` are treated as **failure-backed**
+- if a concept has both success and failure evidence, failure wins
+- if a concept has no usable folder evidence, it is written to `task_ideas_unresolved_memory.json`
+
+### Agent-assisted reconstruction
+
+The reconstruction tool can optionally call Azure OpenAI to infer missing concept mappings for uncovered task folders.
+
+It reads task context from files such as:
+
+- `instruction.md`
+- `concept.md`
+- `session.json`
+- `setup.template.yaml`
+- `answer.template.yaml`
+
+The structured result contains:
+
+- `concept`
+- `description`
+- `tags`
+- `variations`
+- `reasoning_summary`
+
+### Reconstruction usage
+
+Dry-run from folder truth only:
+
+```bash
+python3 agents/task_ideas_memory_rebuilder.py \
+  --game-rule-root /home/developer/Documents/data-disk/k8s/k8s-game-platform/k8s-game-rule
+```
+
+Agent-assisted apply run with automatic backup:
+
+```bash
+./.venv/bin/python agents/task_ideas_memory_rebuilder.py \
+  --game-rule-root /home/developer/Documents/data-disk/k8s/k8s-game-platform/k8s-game-rule \
+  --infer-missing \
+  --apply
+```
+
+Outputs:
+
+- updated `task_ideas_memory.json`
+- updated `task_ideas_failure_memory.json`
+- updated `task_ideas_unresolved_memory.json`
+- `task_ideas_reconstruction_report.json`
+- new `memory-backups-YYYYMMDD-HHMMSS/` directory
 
 ## MCP Integration
 

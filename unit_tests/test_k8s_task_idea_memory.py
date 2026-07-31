@@ -112,8 +112,9 @@ def test_task_ideas_middleware_add_and_query_concepts():
         memory.add_structured_concept(concept)
         memory.add_failed_concept(concept, reason="validation")
 
-        assert memory.concept_exists("cronjobs") is True
-        assert len(memory.get_ideas()) == 1
+        assert memory.concept_exists("cronjobs") is False
+        assert "cronjobs" in memory.failed_concepts
+        assert len(memory.get_ideas()) == 0
     finally:
         for rel in [memory_file, failure_file]:
             p = Path(__file__).resolve().parents[1] / rel
@@ -155,6 +156,44 @@ def test_task_ideas_memory_remove_concept_updates_both_stores():
         memory.remove_concept("Leases")
 
         assert memory.generated_ideas == {}
+        assert memory.failed_concepts == {}
+    finally:
+        for rel in [memory_file, failure_file]:
+            p = Path(__file__).resolve().parents[1] / rel
+            if p.exists():
+                p.unlink()
+
+
+def test_add_failed_concept_removes_existing_success_entry():
+    suffix = uuid.uuid4().hex
+    memory_file = f"tests/.tmp_memory_{suffix}.json"
+    failure_file = f"tests/.tmp_failure_{suffix}.json"
+    try:
+        memory = TaskIdeasMemory(memory_file=memory_file, failure_memory_file=failure_file)
+        concept = _concept("Leases")
+        memory.add_structured_concept(concept)
+        memory.add_failed_concept(concept, reason="boom")
+
+        assert memory.generated_ideas == {}
+        assert "leases" in memory.failed_concepts
+    finally:
+        for rel in [memory_file, failure_file]:
+            p = Path(__file__).resolve().parents[1] / rel
+            if p.exists():
+                p.unlink()
+
+
+def test_add_structured_concept_removes_existing_failure_entry():
+    suffix = uuid.uuid4().hex
+    memory_file = f"tests/.tmp_memory_{suffix}.json"
+    failure_file = f"tests/.tmp_failure_{suffix}.json"
+    try:
+        memory = TaskIdeasMemory(memory_file=memory_file, failure_memory_file=failure_file)
+        concept = _concept("Leases")
+        memory.add_failed_concept(concept, reason="boom")
+        memory.add_structured_concept(concept)
+
+        assert "leases" in memory.generated_ideas
         assert memory.failed_concepts == {}
     finally:
         for rel in [memory_file, failure_file]:

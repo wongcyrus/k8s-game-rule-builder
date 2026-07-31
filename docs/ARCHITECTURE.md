@@ -154,15 +154,79 @@ For the Idea Agent:
 
 ## Memory
 
-Two JSON files at the project root:
+Three active JSON files at the project root plus timestamped backups:
 
 | File | Purpose |
 |------|---------|
 | `task_ideas_memory.json` | Successfully generated concepts — prevents re-generation |
 | `task_ideas_failure_memory.json` | Concepts that failed validation/testing — prevents retrying |
+| `task_ideas_unresolved_memory.json` | Concepts not confidently classified from folder truth yet |
+| `memory-backups-YYYYMMDD-HHMMSS/` | Automatic pre-write snapshots created by the reconstruction tool |
 
 `TaskIdeasMemory` owns memory mutation/query APIs (`add_structured_concept`, `add_failed_concept`, `concept_exists`).
 `TaskIdeasMemoryMiddleware` is read-only injection for Chat Completions, while Responses API paths prepend constraints to instructions.
+
+### Memory mutation rules
+
+`TaskIdeasMemory` now enforces these invariants:
+
+1. a concept cannot remain in both success and failure memory
+2. `add_structured_concept(...)` evicts the same key from failure memory before saving success
+3. `add_failed_concept(...)` evicts the same key from success memory before saving failure
+4. memory writes are atomic to prevent truncated JSON files
+
+### Workflow write timing
+
+The main workflow runner no longer writes success memory immediately after idea generation.
+
+Current behavior:
+
+1. generate idea
+2. run workflow
+3. if workflow succeeds, save to `task_ideas_memory.json`
+4. if workflow fails validation, save to `task_ideas_failure_memory.json`
+5. if the run aborts for environment reasons (for example quarantine / connectivity), remove the concept instead of classifying it
+
+This prevents the old corruption pattern where one concept could be written to success memory before later being classified as failure.
+
+### Reconstruction tool
+
+`agents/task_ideas_memory_rebuilder.py` rebuilds concept memory from the external task folders instead of trusting stale JSON as the source of truth.
+
+Folder truth inputs:
+
+- `tests/game02`
+- `tests/game04`
+- `unsuccessful`
+
+The tool scans task folders recursively by detecting `instruction.md`, which allows it to handle mixed layouts such as:
+
+- flat unsuccessful entries directly under `unsuccessful/`
+- nested entries like `unsuccessful/game02/<task_id>/`
+- nested entries like `unsuccessful/game04/<task_id>/`
+
+### Reconstruction phases
+
+1. **Deterministic classification**
+   - merge existing success/failure memory
+   - classify concepts by task ID membership in pass/fail folders
+   - send anything without enough folder evidence to unresolved
+
+2. **Optional OpenAI reconstruction**
+   - for uncovered task folders, call Azure OpenAI with structured output
+   - infer `concept`, `description`, `tags`, `variations`, and `reasoning_summary`
+   - merge the inferred concept back into success/failure memory using folder truth
+
+### Reconstruction outputs
+
+When run with `--apply`, the tool writes:
+
+- `task_ideas_memory.json`
+- `task_ideas_failure_memory.json`
+- `task_ideas_unresolved_memory.json`
+- `task_ideas_reconstruction_report.json`
+
+and first creates a timestamped backup directory.
 
 ## MCP Integration
 

@@ -93,9 +93,11 @@ def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
         def __init__(self):
             self.generated_ideas = {}
             self.failed_concepts = {}
+            self.saved_successes = 0
 
         def add_structured_concept(self, concept):
             self.generated_ideas["c"] = {"concept": concept.concept}
+            self.saved_successes += 1
 
         def add_failed_concept(self, concept, reason):
             self.failed_concepts["c"] = {"concept": concept.concept, "reason": reason}
@@ -244,6 +246,7 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
 
     asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=1)))
     mem = memory_holder["mem"]
+    assert mem.generated_ideas == {}
     assert "statefulsets" in mem.failed_concepts
     assert mem.saved_failures > 0
 

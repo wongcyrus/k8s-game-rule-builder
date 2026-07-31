@@ -234,9 +234,6 @@ async def run_workflow(
                 target_topic = concept.concept
                 task_id = beginner_task.task_id
 
-                # Save concept immediately so restarts won't regenerate it
-                idea_memory.add_structured_concept(concept)
-
                 # Step 2: Run workflow
                 logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
 
@@ -290,9 +287,9 @@ async def run_workflow(
 
                 # Update memory based on workflow outcome
                 if workflow_succeeded:
+                    idea_memory.add_structured_concept(concept)
                     logging.info(f"💾 Task succeeded: {concept.concept}")
                 else:
-                    # Move from success memory to failure memory
                     idea_memory.add_failed_concept(concept, reason="Workflow validation failed")
                     logging.info(f"💾 Saved concept to failure memory: {concept.concept}")
 
