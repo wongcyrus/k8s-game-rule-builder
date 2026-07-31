@@ -1,4 +1,5 @@
 """Data models for K8s task generation workflow."""
+from collections.abc import Callable
 from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
@@ -18,6 +19,10 @@ class TestResult(BaseModel):
     task_id: str = Field(description="Task ID being tested")
     task_directory: str = Field(description="Task directory path")
     raw_output: str = Field(default="", description="Raw pytest output for debugging")
+
+
+class WorkflowStopRequested(Exception):
+    """Raised when the user interrupts the workflow and the current concept must not be classified."""
 
 
 @dataclass
@@ -69,3 +74,5 @@ class InitialWorkflowState:
     objective: str
     retry_count: int = 0
     max_retries: int = 3
+    stop_requested_callback: Callable[[], bool] | None = None
+    task_dir_preexisting: bool = False

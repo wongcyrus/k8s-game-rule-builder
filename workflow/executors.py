@@ -24,6 +24,7 @@ from workflow.models import (
     ValidationResult,
     TestResult,
     CombinedValidationResult,
+    WorkflowStopRequested,
 )
 from workflow.preflight import (
     K8sConnectivityError,
@@ -32,6 +33,13 @@ from workflow.preflight import (
 )
 
 _MISSING = object()  # sentinel for get_state fallback detection
+
+
+def _is_stop_requested(ctx: WorkflowContext) -> bool:
+    callback = ctx.get_state("stop_requested_callback", _MISSING)
+    if callback is _MISSING or callback is None:
+        return False
+    return bool(callback())
 
 
 def _environment_failed_game_root() -> Path:
@@ -325,6 +333,8 @@ async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialW
         ctx.set_state("objective", message.objective)
         ctx.set_state("retry_count", message.retry_count)
         ctx.set_state("max_retries", message.max_retries)
+        ctx.set_state("stop_requested_callback", message.stop_requested_callback)
+        ctx.set_state("task_dir_preexisting", message.task_dir_preexisting)
         logging.info(f"Set state: task_id={message.task_id}, topic={message.target_topic}")
         
         # Pre-create the task directory so the agent can write files immediately
@@ -346,6 +356,7 @@ async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialW
                     "Missing task state and message is not a prompt string; cannot initialize retry state."
                 )
             parsed_task_id, parsed_topic = _parse_task_metadata_from_prompt(message)
+            task_dir = PATHS.game_root / parsed_task_id
             
             ctx.set_state("task_id", parsed_task_id)
             ctx.set_state("target_topic", parsed_topic)
@@ -354,8 +365,8 @@ async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialW
             ctx.set_state("objective", parsed_topic)
             ctx.set_state("retry_count", 0)
             ctx.set_state("max_retries", 3)
+            ctx.set_state("task_dir_preexisting", task_dir.exists())
             
-            task_dir = PATHS.game_root / parsed_task_id
             task_dir.mkdir(parents=True, exist_ok=True)
             logging.info(f"DevUI first run - parsed task_id={parsed_task_id}, topic={parsed_topic}")
             logging.info(f"Pre-created task directory: {task_dir}")
@@ -574,6 +585,15 @@ async def remove_task(combined: CombinedValidationResult, ctx: WorkflowContext[C
 async def check_loop(combined: CombinedValidationResult, ctx: WorkflowContext[CombinedValidationResult]) -> None:
     """Check if we should retry or complete the workflow."""
     logging.info(f"\n[STEP] Checking retry status: {combined.retry_count}/{combined.max_retries}")
+    if _is_stop_requested(ctx) and combined.should_retry:
+        logging.info(
+            "Graceful stop requested after the current attempt for %s. Exiting without classifying memory.",
+            combined.test.task_id,
+        )
+        raise WorkflowStopRequested(
+            f"Interrupted after attempt {combined.retry_count} for {combined.test.task_id}"
+        )
+
     await ctx.send_message(combined)
 
 

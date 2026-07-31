@@ -2,10 +2,15 @@
 import asyncio
 import argparse
 import importlib
+import json
 import logging
+import os
 import signal
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from threading import current_thread, main_thread
 
 from agent_framework import (
@@ -17,7 +22,7 @@ from agents.config import PATHS
 from agents.k8s_task_idea_agent import create_idea_agent_with_mcp
 from workflow.idea_generator import generate_task_idea
 from workflow.builder import build_workflow
-from workflow.models import InitialWorkflowState
+from workflow.models import InitialWorkflowState, WorkflowStopRequested
 from workflow.preflight import (
     K8sConnectivityError,
     QuarantinedTaskError,
@@ -35,6 +40,22 @@ logging.basicConfig(
 logging.getLogger("azure").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("agent_framework").setLevel(logging.WARNING)
+
+
+INTERRUPTED_TASK_ARTIFACT_GLOBS = (
+    "*.gen.yaml",
+    "test_result.txt",
+    "no_answer_test_result.txt",
+    "test_*.json",
+)
+
+CLUSTER_SCOPED_RESOURCE_KEYS = {
+    "pv_name": "persistentvolume",
+    "storageclass_name": "storageclass",
+    "priorityclass_name": "priorityclass.scheduling.k8s.io",
+    "gatewayclass_name": "gatewayclass.gateway.networking.k8s.io",
+    "csidriver_name": "csidriver.storage.k8s.io",
+}
 
 
 @dataclass(frozen=True)
@@ -59,18 +80,20 @@ class GracefulStopController:
     def stop_requested(self) -> bool:
         return self._stop_requested
 
+    class GracefulStopRequested(KeyboardInterrupt):
+        """Raised on the first stop request so blocked operations unwind promptly."""
+
     def request_stop(self, signum: int | None = None, _frame=None) -> None:
         self._signal_count += 1
+        signal_name = signal.Signals(signum).name if signum is not None else "manual request"
         if self._signal_count == 1:
             self._stop_requested = True
-            signal_name = signal.Signals(signum).name if signum is not None else "manual request"
             logging.warning(
-                "Stop requested via %s. Finishing the current task before exiting. Press Ctrl+C again to abort immediately.",
+                "Stop requested via %s. Interrupting the current wait and exiting cleanly. Press Ctrl+C again to abort immediately.",
                 signal_name,
             )
-            return
+            raise self.GracefulStopRequested("Graceful workflow shutdown requested")
 
-        signal_name = signal.Signals(signum).name if signum is not None else "manual request"
         logging.warning("Received %s again. Aborting immediately.", signal_name)
         raise KeyboardInterrupt("Forced workflow shutdown requested")
 
@@ -161,6 +184,95 @@ def reset_minikube(iteration: int, config: WorkflowRuntimeConfig, *, k8s_configu
         logging.error(f"Error during minikube operation: {e}")
 
 
+def _run_best_effort_kubectl(args: list[str]) -> None:
+    env = {**os.environ, "KUBECONFIG": os.environ.get("KUBECONFIG", "/home/developer/.kube/config")}
+    try:
+        result = subprocess.run(
+            ["kubectl", *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+    except FileNotFoundError:
+        logging.warning("kubectl command not found during interrupted task cleanup")
+        return
+    except Exception as exc:
+        logging.warning("Interrupted task cleanup command failed to start %s: %s", args, exc)
+        return
+
+    if result.returncode != 0 and result.stderr.strip():
+        logging.warning("Interrupted task cleanup command failed %s: %s", args, result.stderr.strip())
+
+
+def _load_interrupted_task_runtime_contexts(task_dir: Path) -> list[dict[str, object]]:
+    contexts: list[dict[str, object]] = []
+    for path in sorted(task_dir.glob("test_*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logging.warning("Failed to parse runtime context %s: %s", path, exc)
+            continue
+        if isinstance(data, dict):
+            contexts.append(data)
+    return contexts
+
+
+def _cleanup_interrupted_cluster_resources(task_dir: Path) -> None:
+    for manifest_name in ("answer.gen.yaml", "setup.gen.yaml"):
+        manifest_path = task_dir / manifest_name
+        if manifest_path.exists():
+            _run_best_effort_kubectl(["delete", "-f", str(manifest_path), "--ignore-not-found=true"])
+
+    contexts = _load_interrupted_task_runtime_contexts(task_dir)
+    seen_namespaces: set[str] = set()
+    seen_cluster_scoped: set[tuple[str, str]] = set()
+    for context in contexts:
+        namespace = context.get("namespace")
+        if isinstance(namespace, str) and namespace and namespace not in seen_namespaces:
+            seen_namespaces.add(namespace)
+            _run_best_effort_kubectl(["delete", "namespace", namespace, "--ignore-not-found=true", "--wait=false"])
+
+        for key, resource_type in CLUSTER_SCOPED_RESOURCE_KEYS.items():
+            name = context.get(key)
+            if isinstance(name, str) and name:
+                resource_ref = (resource_type, name)
+                if resource_ref not in seen_cluster_scoped:
+                    seen_cluster_scoped.add(resource_ref)
+                    _run_best_effort_kubectl(["delete", resource_type, name, "--ignore-not-found=true"])
+
+
+def _cleanup_interrupted_local_artifacts(task_dir: Path, *, task_dir_preexisting: bool) -> None:
+    if not task_dir.exists():
+        return
+
+    if not task_dir_preexisting:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        return
+
+    for pattern in INTERRUPTED_TASK_ARTIFACT_GLOBS:
+        for path in task_dir.glob(pattern):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+            except Exception as exc:
+                logging.warning("Failed to remove interrupted artifact %s: %s", path, exc)
+
+    for pycache_dir in task_dir.rglob("__pycache__"):
+        try:
+            shutil.rmtree(pycache_dir, ignore_errors=True)
+        except Exception as exc:
+            logging.warning("Failed to remove interrupted cache dir %s: %s", pycache_dir, exc)
+
+
+def _cleanup_interrupted_task(*, task_id: str, task_dir: Path, task_dir_preexisting: bool) -> None:
+    logging.info("Cleaning interrupted task artifacts for %s", task_id)
+    _cleanup_interrupted_cluster_resources(task_dir)
+    _cleanup_interrupted_local_artifacts(task_dir, task_dir_preexisting=task_dir_preexisting)
+
+
 async def run_workflow(
     config: WorkflowRuntimeConfig | None = None,
     *,
@@ -193,6 +305,12 @@ async def run_workflow(
         args=["-y", "@modelcontextprotocol/server-filesystem", str(PATHS.tests_root.parent)],
         load_prompts=False
     )
+
+    current_concept = None
+    current_task_id: str | None = None
+    current_task_dir: Path | None = None
+    current_task_dir_preexisting = False
+    current_idea_memory = None
     
     try:
         async with docs_mcp_tool, tests_mcp_tool:
@@ -209,10 +327,22 @@ async def run_workflow(
 
                 logging.info(f"\n[ITERATION {iteration + 1}/{num_iterations}] Starting task generation...")
                 reset_minikube(iteration, config, k8s_configuration=k8s_configuration)
+                if stop_controller.stop_requested:
+                    logging.info(
+                        "Graceful stop requested during iteration %s setup. Stopping before task generation.",
+                        iteration + 1,
+                    )
+                    break
                 if iteration == 0:
                     logging.info("[PREFLIGHT] Verifying Kubernetes connectivity before task generation...")
                     preflight_output = run_k8s_preflight_check()
                     logging.info("[PREFLIGHT] Kubernetes connectivity OK:\n%s", preflight_output)
+                    if stop_controller.stop_requested:
+                        logging.info(
+                            "Graceful stop requested during preflight for iteration %s. Stopping before task generation.",
+                            iteration + 1,
+                        )
+                        break
 
                 # Create a new agent and workflow for each iteration
                 idea_agent, idea_memory = await create_idea_agent_with_mcp(docs_mcp_tool)
@@ -233,6 +363,13 @@ async def run_workflow(
                 beginner_task = concept.variations[0]
                 target_topic = concept.concept
                 task_id = beginner_task.task_id
+                task_dir = PATHS.game_root / task_id
+                task_dir_preexisting = task_dir.exists()
+                current_concept = concept
+                current_task_id = task_id
+                current_task_dir = task_dir
+                current_task_dir_preexisting = task_dir_preexisting
+                current_idea_memory = idea_memory
 
                 # Step 2: Run workflow
                 logging.info(f"\n[STEP 2] Running workflow to generate task files for iteration {iteration + 1}...")
@@ -266,7 +403,9 @@ async def run_workflow(
                     difficulty=beginner_task.difficulty,
                     objective=beginner_task.objective,
                     retry_count=0,
-                    max_retries=config.max_retries
+                    max_retries=config.max_retries,
+                    stop_requested_callback=lambda: stop_controller.stop_requested,
+                    task_dir_preexisting=task_dir_preexisting,
                 )
 
                 workflow_succeeded = False
@@ -284,6 +423,19 @@ async def run_workflow(
                 except K8sConnectivityError:
                     idea_memory.remove_concept(concept.concept)
                     raise
+                except WorkflowStopRequested:
+                    idea_memory.remove_concept(concept.concept)
+                    if current_task_dir is not None:
+                        _cleanup_interrupted_task(
+                            task_id=task_id,
+                            task_dir=current_task_dir,
+                            task_dir_preexisting=current_task_dir_preexisting,
+                        )
+                    logging.info(
+                        "Workflow interrupted for concept %s. Removed it from memory and stopped cleanly.",
+                        concept.concept,
+                    )
+                    break
                 except Exception as exc:
                     # Task-level workflow crashes are real failures for this concept, not
                     # environment invalidations, so persist them and continue iterating.
@@ -300,6 +452,11 @@ async def run_workflow(
                             iteration + 2,
                         )
                         break
+                    current_concept = None
+                    current_task_id = None
+                    current_task_dir = None
+                    current_task_dir_preexisting = False
+                    current_idea_memory = None
                     continue
 
                 # Update memory based on workflow outcome
@@ -311,6 +468,11 @@ async def run_workflow(
                     logging.info(f"💾 Saved concept to failure memory: {concept.concept}")
 
                 logging.info(f"\n[ITERATION {iteration + 1}] Complete")
+                current_concept = None
+                current_task_id = None
+                current_task_dir = None
+                current_task_dir_preexisting = False
+                current_idea_memory = None
 
                 if stop_controller.stop_requested:
                     logging.info(
@@ -322,6 +484,16 @@ async def run_workflow(
             logging.info("\n" + "="*80)
             logging.info("WORKFLOW COMPLETE")
             logging.info("="*80)
+    except GracefulStopController.GracefulStopRequested:
+        if current_concept is not None and current_idea_memory is not None:
+            current_idea_memory.remove_concept(current_concept.concept)
+            if current_task_dir is not None and current_task_id is not None:
+                _cleanup_interrupted_task(
+                    task_id=current_task_id,
+                    task_dir=current_task_dir,
+                    task_dir_preexisting=current_task_dir_preexisting,
+                )
+        logging.info("Graceful stop complete. Workflow exited without starting another task.")
     finally:
         stop_controller.restore_signal_handlers()
 

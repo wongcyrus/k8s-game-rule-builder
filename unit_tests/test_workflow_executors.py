@@ -143,6 +143,17 @@ def test_remove_task_increments_retry_and_sets_failure_reasons():
     assert ctx.sent[0].retry_count == 2
 
 
+def test_check_loop_skips_additional_retries_when_stop_requested():
+    ctx = _FakeCtx()
+    ctx.set_state("stop_requested_callback", lambda: True)
+    combined = _combined(task_id="053b_demo", retry_count=1, max_retries=3)
+
+    with pytest.raises(executors.WorkflowStopRequested, match="Interrupted after attempt 1 for 053b_demo"):
+        _call_executor(executors.check_loop, combined, ctx)
+
+    assert ctx.sent == []
+
+
 def test_run_pytest_skip_answer_marks_failure_when_check_does_not_fail(monkeypatch):
     ctx = _FakeCtx()
     combined = _combined(task_id="054_demo", retry_count=0, max_retries=2)
