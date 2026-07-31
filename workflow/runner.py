@@ -285,6 +285,8 @@ async def run_workflow(
                     idea_memory.remove_concept(concept.concept)
                     raise
                 except Exception as exc:
+                    # Task-level workflow crashes are real failures for this concept, not
+                    # environment invalidations, so persist them and continue iterating.
                     reason = f"Workflow execution error: {type(exc).__name__}: {exc}"
                     idea_memory.add_failed_concept(concept, reason=reason)
                     logging.exception(
