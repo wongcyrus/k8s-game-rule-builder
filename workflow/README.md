@@ -148,5 +148,6 @@ asyncio.run(run_workflow())
 - **Failure Tracking**: Moves failed tasks to unsuccessful folder with detailed reports
 - **K8s Preflight Gate**: Verifies Kubernetes connectivity once before any task generation begins
 - **Environment Quarantine**: Isolates tasks into `environment_failed/` without touching memory when the cluster breaks mid-run
+- **Iteration Crash Recovery**: Unexpected workflow execution errors are saved to failure memory and the runner advances to the next iteration
 - **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True` using JUnit XML result parsing
 - **Cluster-Aware Test Prompts**: Agent instructions now prefer `build_kube_config_from_input(json_input)` and skip optional CRD/controller checks when the API is not installed

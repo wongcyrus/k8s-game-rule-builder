@@ -251,6 +251,123 @@ def test_run_workflow_failure_path_saves_failed_concept(monkeypatch, tmp_path):
     assert mem.saved_failures > 0
 
 
+def test_run_workflow_unexpected_exception_saves_failed_concept_and_continues(monkeypatch, tmp_path):
+    class FakeMCP:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    workflow_calls = []
+
+    class FakeWorkflow:
+        def __init__(self, should_raise: bool):
+            self.should_raise = should_raise
+
+        def run(self, _state, stream=True):
+            async def _gen():
+                if self.should_raise:
+                    raise RuntimeError("fixer exploded")
+                yield type("Evt", (), {"type": "output", "data": "successfully generated"})
+            return _gen()
+
+    class FakeMemory:
+        def __init__(self):
+            self.generated_ideas = {}
+            self.failed_concepts = {}
+            self.saved_failures = 0
+            self.saved_successes = 0
+
+        def add_structured_concept(self, concept):
+            self.generated_ideas[concept.concept.lower()] = {"concept": concept.concept}
+            self.saved_successes += 1
+
+        def add_failed_concept(self, concept, reason):
+            self.failed_concepts[concept.concept.lower()] = {"concept": concept.concept, "reason": reason}
+            self.saved_failures += 1
+
+        def remove_concept(self, concept):
+            self.generated_ideas.pop(concept.lower(), None)
+            self.failed_concepts.pop(concept.lower(), None)
+
+    class _VarA:
+        task_id = "110_demo"
+        difficulty = "BEGINNER"
+        objective = "obj"
+
+    class _ConceptA:
+        concept = "Leases"
+        description = "desc"
+        tags = ["coordination"]
+        variations = [_VarA()]
+
+    class _VarB:
+        task_id = "111_demo"
+        difficulty = "BEGINNER"
+        objective = "obj"
+
+    class _ConceptB:
+        concept = "DaemonSets"
+        description = "desc"
+        tags = ["workloads"]
+        variations = [_VarB()]
+
+    memory = FakeMemory()
+    concepts = [_ConceptA(), _ConceptB()]
+
+    async def fake_create_idea_agent_with_mcp(_tool):
+        return object(), memory
+
+    async def fake_generate_task_idea(_agent, _memory):
+        return concepts.pop(0)
+
+    async def fake_build_workflow(_tool):
+        should_raise = len(workflow_calls) == 0
+        workflow_calls.append("built")
+        return FakeWorkflow(should_raise), object(), object()
+
+    monkeypatch.setattr(runner, "MCPStdioTool", FakeMCP)
+    monkeypatch.setattr(runner, "create_idea_agent_with_mcp", fake_create_idea_agent_with_mcp)
+    monkeypatch.setattr(runner, "generate_task_idea", fake_generate_task_idea)
+    monkeypatch.setattr(runner, "build_workflow", fake_build_workflow)
+    monkeypatch.setattr(runner, "reset_minikube", lambda _iteration, _config, **_kwargs: None)
+    monkeypatch.setattr(
+        runner,
+        "resolve_k8s_configuration",
+        lambda: type("Cfg", (), {"endpoint": "https://localhost:8443"})(),
+    )
+    monkeypatch.setattr(runner, "run_k8s_preflight_check", lambda: "namespace/default")
+    monkeypatch.setattr(runner, "WorkflowViz", lambda _workflow: type("V", (), {"save_png": lambda self, p: None})())
+    monkeypatch.setattr(
+        runner,
+        "PATHS",
+        type(
+            "P",
+            (),
+            {
+                "k8s_docs_root": tmp_path / "docs",
+                "tests_root": tmp_path / "tests",
+                "game_root": tmp_path / "tests/game02",
+            },
+        )(),
+    )
+
+    import asyncio
+
+    asyncio.run(runner.run_workflow(runner.WorkflowRuntimeConfig(iterations=2)))
+
+    assert workflow_calls == ["built", "built"]
+    assert "leases" in memory.failed_concepts
+    assert memory.failed_concepts["leases"]["reason"] == "Workflow execution error: RuntimeError: fixer exploded"
+    assert "daemonsets" in memory.generated_ideas
+    assert memory.saved_failures == 1
+    assert memory.saved_successes == 1
+
+
 def test_run_workflow_runs_preflight_once(monkeypatch, tmp_path):
     class FakeMCP:
         def __init__(self, *args, **kwargs):

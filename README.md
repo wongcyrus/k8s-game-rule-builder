@@ -13,6 +13,7 @@ A Python project for building Kubernetes learning game rules using AI agents pow
 - **Template-Based System**: Uses Jinja2 templates with dynamic variable substitution
 - **Pure Python Validation**: No LLM for validation or testing — faster, more reliable, cost-effective
 - **Retry Loop with Targeted Fixes**: Automatic retry on failure with a Fixer Agent that reads errors and patches only broken files
+- **Iteration Crash Recovery**: Unexpected workflow execution errors are recorded in failure memory so later iterations can continue instead of aborting the full run
 - **Responses API Support**: Automatic model detection — uses Chat Completions or Responses API based on the configured deployment
 - **Skip-Answer Validation**: Extra validation step that confirms `test_05_check.py` fails when the answer is not deployed
 - **Comprehensive Logging**: Built-in middleware for debugging and monitoring

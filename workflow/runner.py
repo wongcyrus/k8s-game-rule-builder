@@ -284,6 +284,21 @@ async def run_workflow(
                 except K8sConnectivityError:
                     idea_memory.remove_concept(concept.concept)
                     raise
+                except Exception as exc:
+                    reason = f"Workflow execution error: {type(exc).__name__}: {exc}"
+                    idea_memory.add_failed_concept(concept, reason=reason)
+                    logging.exception(
+                        "Workflow crashed for concept %s. Saved it to failure memory.",
+                        concept.concept,
+                    )
+                    logging.info(f"\n[ITERATION {iteration + 1}] Complete")
+                    if stop_controller.stop_requested:
+                        logging.info(
+                            "Graceful stop requested. Current task finished; stopping before iteration %s.",
+                            iteration + 2,
+                        )
+                        break
+                    continue
 
                 # Update memory based on workflow outcome
                 if workflow_succeeded:
