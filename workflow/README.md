@@ -69,7 +69,8 @@ python workflow.py \
   --no-reset-minikube \
   --minikube-delete-timeout 120 \
   --minikube-start-timeout 300 \
-  --graph-output workflow_graph.png
+  --graph-output workflow_graph.png \
+  --stop-file .workflow-stop
 ```
 
 Defaults:
@@ -80,9 +81,12 @@ Defaults:
 - Kubernetes preflight uses that same `k8s-configure/config.yaml` directly as the authoritative kubeconfig
 
 Runtime stop behavior:
-- press `Ctrl+C` once to finish the current task cleanly, then exit before the next task
-- the current task still runs through validation, fixer retries, success/failure memory updates, and quarantine handling
-- press `Ctrl+C` again to abort immediately
+- preferred: create the configured stop file (default `.workflow-stop`) to request a graceful stop
+- the runner polls that stop file between steps, and the pytest runner also watches it while tests are running
+- first `Ctrl+C` requests that same graceful stop path
+- second `Ctrl+C` aborts immediately
+- interrupted work does **not** enter success or failure memory and does **not** move into `unsuccessful/`
+- interrupted tasks clean generated artifacts and best-effort runtime resources before the runner exits
 
 ## Related Components
 
@@ -122,6 +126,12 @@ Run the workflow from the project root:
 python workflow.py
 ```
 
+Request a graceful stop:
+
+```bash
+touch .workflow-stop
+```
+
 Run builder unit tests:
 
 ```bash
@@ -149,5 +159,8 @@ asyncio.run(run_workflow())
 - **K8s Preflight Gate**: Verifies Kubernetes connectivity once before any task generation begins
 - **Environment Quarantine**: Isolates tasks into `environment_failed/` without touching memory when the cluster breaks mid-run
 - **Iteration Crash Recovery**: Unexpected workflow execution errors are saved to failure memory and the runner advances to the next iteration
+- **Stable Stop Mechanism**: A stop-file based graceful stop path avoids fragile signal-only shutdown behavior
+- **Memory-Safe Interrupts**: User-requested stops remove the in-progress concept from memory instead of classifying it
+- **Interrupted Task Cleanup**: Partial local artifacts and best-effort runtime leftovers are cleaned on graceful stop
 - **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True` using JUnit XML result parsing
 - **Cluster-Aware Test Prompts**: Agent instructions now prefer `build_kube_config_from_input(json_input)` and skip optional CRD/controller checks when the API is not installed

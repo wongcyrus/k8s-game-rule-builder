@@ -5,12 +5,20 @@ No LLM needed - just deterministic command execution.
 """
 import json
 import logging
-import subprocess
+import os
+from pathlib import Path
 import re
 import shlex
-import os
+import signal
+import subprocess
+import threading
 from typing import Any
 from .config import PATHS
+
+
+_ACTIVE_PROCESS_LOCK = threading.Lock()
+_ACTIVE_PROCESS: subprocess.Popen[str] | None = None
+_INTERRUPT_REQUESTED = threading.Event()
 
 
 def _result(is_valid: bool, reason: str, details: list[Any] | None = None) -> dict[str, Any]:
@@ -52,6 +60,59 @@ def _save_test_output(command: str, combined_output: str, skip_answer: bool) -> 
     logging.info(f"💾 Saved test output to: {test_result_file}")
 
 
+def request_pytest_interrupt() -> None:
+    """Request interruption of the active pytest subprocess, if one exists."""
+    _INTERRUPT_REQUESTED.set()
+    with _ACTIVE_PROCESS_LOCK:
+        process = _ACTIVE_PROCESS
+    if process is None or process.poll() is not None:
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGINT)
+    except ProcessLookupError:
+        return
+    except Exception as exc:
+        logging.warning("Failed to interrupt active pytest process cleanly: %s", exc)
+
+
+def _set_active_process(process: subprocess.Popen[str] | None) -> None:
+    with _ACTIVE_PROCESS_LOCK:
+        global _ACTIVE_PROCESS
+        _ACTIVE_PROCESS = process
+
+
+def _communicate_with_interrupt(process: subprocess.Popen[str]) -> tuple[str, str, bool]:
+    interrupted = False
+    stop_file = os.environ.get("K8S_BUILDER_STOP_FILE", "").strip()
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.2)
+            return stdout, stderr, interrupted
+        except subprocess.TimeoutExpired:
+            if stop_file and Path(stop_file).exists():
+                _INTERRUPT_REQUESTED.set()
+
+            if not _INTERRUPT_REQUESTED.is_set():
+                continue
+
+            interrupted = True
+            try:
+                os.killpg(process.pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+            return stdout, stderr, interrupted
+
+
 def run_pytest_command(command: str) -> dict[str, Any]:
     """Run the provided pytest command and return structured result.
     
@@ -81,15 +142,23 @@ def run_pytest_command(command: str) -> dict[str, Any]:
     except ValueError as exc:
         return _result(False, f"Invalid pytest command: {exc}")
 
-    result = subprocess.run(
+    _INTERRUPT_REQUESTED.clear()
+    process = subprocess.Popen(
         cmd_list,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,  # Don't raise exception, check exit code manually
         cwd=test_project_path,
+        start_new_session=True,
     )
-    
-    combined_output = result.stdout + "\n" + result.stderr
+    _set_active_process(process)
+    try:
+        stdout, stderr, interrupted = _communicate_with_interrupt(process)
+    finally:
+        _set_active_process(None)
+
+    returncode = process.returncode
+    combined_output = stdout + "\n" + stderr
     
     try:
         _save_test_output(normalized_command, combined_output, skip_answer)
@@ -104,20 +173,26 @@ def run_pytest_command(command: str) -> dict[str, Any]:
     # 4 = pytest command line usage error
     # 5 = no tests collected
     
-    if result.returncode == 0:
+    if interrupted or returncode == 2:
+        logging.warning("Pytest interrupted by graceful stop")
+        payload = _result(False, "Pytest interrupted by graceful stop", details=[combined_output])
+        payload["returncode"] = returncode
+        payload["interrupted"] = True
+        return payload
+    if returncode == 0:
         logging.info(combined_output)
         payload = _result(True, "All tests passed", details=[combined_output])
-        payload["returncode"] = result.returncode
+        payload["returncode"] = returncode
         return payload
-    elif result.returncode == 5:
+    elif returncode == 5:
         logging.warning(combined_output)
         payload = _result(False, "No tests collected", details=[combined_output])
-        payload["returncode"] = result.returncode
+        payload["returncode"] = returncode
         return payload
     else:
         logging.error(combined_output)
-        payload = _result(False, f"Tests failed (exit code {result.returncode})", details=[combined_output])
-        payload["returncode"] = result.returncode
+        payload = _result(False, f"Tests failed (exit code {returncode})", details=[combined_output])
+        payload["returncode"] = returncode
         return payload
 
 

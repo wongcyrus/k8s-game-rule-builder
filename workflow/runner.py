@@ -66,33 +66,86 @@ class WorkflowRuntimeConfig:
     minikube_start_timeout: int = 300
     max_retries: int = 3
     save_workflow_graph: bool = True
+    stop_file: str | None = ".workflow-stop"
+    post_iteration_stop_wait_seconds: float = 2.0
 
 
 class GracefulStopController:
     """Handle task-level graceful shutdown for the workflow runner."""
 
-    def __init__(self) -> None:
+    def __init__(self, stop_file: str | None = None) -> None:
         self._stop_requested = False
         self._signal_count = 0
         self._restore_handlers: list[tuple[int, signal.Handlers]] = []
+        self._stop_file = Path(stop_file).resolve() if stop_file else None
 
     @property
     def stop_requested(self) -> bool:
+        self._poll_stop_file()
         return self._stop_requested
 
-    class GracefulStopRequested(KeyboardInterrupt):
-        """Raised on the first stop request so blocked operations unwind promptly."""
+    @property
+    def stop_file(self) -> Path | None:
+        return self._stop_file
+
+    def prepare_stop_file(self) -> None:
+        if self._stop_file is None:
+            return
+        try:
+            self._stop_file.unlink(missing_ok=True)
+        except Exception as exc:
+            logging.warning("Failed to remove stale stop file %s: %s", self._stop_file, exc)
+
+    def clear_stop_file(self) -> None:
+        if self._stop_file is None:
+            return
+        try:
+            self._stop_file.unlink(missing_ok=True)
+        except Exception as exc:
+            logging.warning("Failed to clear stop file %s: %s", self._stop_file, exc)
+
+    def _request_active_pytest_interrupt(self) -> None:
+        try:
+            from agents.pytest_runner import request_pytest_interrupt
+            request_pytest_interrupt()
+        except Exception as exc:
+            logging.warning("Failed to request pytest interruption during graceful stop: %s", exc)
+
+    def _mark_stop_requested(self, source: str) -> None:
+        if self._stop_requested:
+            return
+        self._stop_requested = True
+        self._request_active_pytest_interrupt()
+        logging.warning(
+            "Stop requested via %s. The workflow will stop cleanly after the current step and cleanup.",
+            source,
+        )
+
+    def _poll_stop_file(self) -> None:
+        if self._stop_requested or self._stop_file is None:
+            return
+        if self._stop_file.exists():
+            self._mark_stop_requested(f"stop file {self._stop_file}")
+
+    async def wait_for_post_iteration_stop_window(self, seconds: float) -> bool:
+        if seconds <= 0:
+            return self.stop_requested
+        if self.stop_requested:
+            return True
+
+        deadline = asyncio.get_running_loop().time() + seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if self.stop_requested:
+                return True
+            await asyncio.sleep(0.1)
+        return self.stop_requested
 
     def request_stop(self, signum: int | None = None, _frame=None) -> None:
         self._signal_count += 1
         signal_name = signal.Signals(signum).name if signum is not None else "manual request"
         if self._signal_count == 1:
-            self._stop_requested = True
-            logging.warning(
-                "Stop requested via %s. Interrupting the current wait and exiting cleanly. Press Ctrl+C again to abort immediately.",
-                signal_name,
-            )
-            raise self.GracefulStopRequested("Graceful workflow shutdown requested")
+            self._mark_stop_requested(signal_name)
+            return
 
         logging.warning("Received %s again. Aborting immediately.", signal_name)
         raise KeyboardInterrupt("Forced workflow shutdown requested")
@@ -273,6 +326,20 @@ def _cleanup_interrupted_task(*, task_id: str, task_dir: Path, task_dir_preexist
     _cleanup_interrupted_local_artifacts(task_dir, task_dir_preexisting=task_dir_preexisting)
 
 
+async def _wait_for_post_iteration_stop_window(stop_controller, seconds: float) -> bool:
+    if hasattr(stop_controller, "wait_for_post_iteration_stop_window"):
+        return await stop_controller.wait_for_post_iteration_stop_window(seconds)
+    if seconds <= 0:
+        return bool(getattr(stop_controller, "stop_requested", False))
+
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if bool(getattr(stop_controller, "stop_requested", False)):
+            return True
+        await asyncio.sleep(0.1)
+    return bool(getattr(stop_controller, "stop_requested", False))
+
+
 async def run_workflow(
     config: WorkflowRuntimeConfig | None = None,
     *,
@@ -280,7 +347,14 @@ async def run_workflow(
 ):
     """Run the complete K8s task generation workflow."""
     config = config or WorkflowRuntimeConfig()
-    stop_controller = stop_controller or GracefulStopController()
+    stop_controller = stop_controller or GracefulStopController(config.stop_file)
+    if hasattr(stop_controller, "prepare_stop_file"):
+        stop_controller.prepare_stop_file()
+    previous_stop_file_env = os.environ.get("K8S_BUILDER_STOP_FILE")
+    if getattr(stop_controller, "stop_file", None):
+        os.environ["K8S_BUILDER_STOP_FILE"] = str(stop_controller.stop_file)
+    else:
+        os.environ.pop("K8S_BUILDER_STOP_FILE", None)
     stop_controller.install_signal_handlers()
     # Force reload to pick up code changes
     if 'agents.pytest_runner' in sys.modules:
@@ -446,18 +520,35 @@ async def run_workflow(
                         concept.concept,
                     )
                     logging.info(f"\n[ITERATION {iteration + 1}] Complete")
-                    if stop_controller.stop_requested:
-                        logging.info(
-                            "Graceful stop requested. Current task finished; stopping before iteration %s.",
-                            iteration + 2,
-                        )
-                        break
                     current_concept = None
                     current_task_id = None
                     current_task_dir = None
                     current_task_dir_preexisting = False
                     current_idea_memory = None
+                    if await _wait_for_post_iteration_stop_window(
+                        stop_controller,
+                        config.post_iteration_stop_wait_seconds
+                    ):
+                        logging.info(
+                            "Graceful stop requested. Current task finished; stopping before iteration %s.",
+                            iteration + 2,
+                        )
+                        break
                     continue
+
+                if stop_controller.stop_requested:
+                    idea_memory.remove_concept(concept.concept)
+                    if current_task_dir is not None:
+                        _cleanup_interrupted_task(
+                            task_id=task_id,
+                            task_dir=current_task_dir,
+                            task_dir_preexisting=current_task_dir_preexisting,
+                        )
+                    logging.info(
+                        "Workflow stop was requested during concept %s. Removed it from memory and exited cleanly.",
+                        concept.concept,
+                    )
+                    break
 
                 # Update memory based on workflow outcome
                 if workflow_succeeded:
@@ -474,7 +565,10 @@ async def run_workflow(
                 current_task_dir_preexisting = False
                 current_idea_memory = None
 
-                if stop_controller.stop_requested:
+                if await _wait_for_post_iteration_stop_window(
+                    stop_controller,
+                    config.post_iteration_stop_wait_seconds
+                ):
                     logging.info(
                         "Graceful stop requested. Current task finished; stopping before iteration %s.",
                         iteration + 2,
@@ -484,17 +578,13 @@ async def run_workflow(
             logging.info("\n" + "="*80)
             logging.info("WORKFLOW COMPLETE")
             logging.info("="*80)
-    except GracefulStopController.GracefulStopRequested:
-        if current_concept is not None and current_idea_memory is not None:
-            current_idea_memory.remove_concept(current_concept.concept)
-            if current_task_dir is not None and current_task_id is not None:
-                _cleanup_interrupted_task(
-                    task_id=current_task_id,
-                    task_dir=current_task_dir,
-                    task_dir_preexisting=current_task_dir_preexisting,
-                )
-        logging.info("Graceful stop complete. Workflow exited without starting another task.")
     finally:
+        if previous_stop_file_env is None:
+            os.environ.pop("K8S_BUILDER_STOP_FILE", None)
+        else:
+            os.environ["K8S_BUILDER_STOP_FILE"] = previous_stop_file_env
+        if hasattr(stop_controller, "clear_stop_file"):
+            stop_controller.clear_stop_file()
         stop_controller.restore_signal_handlers()
 
 
@@ -527,6 +617,17 @@ def main():
         default=True,
         help="Enable or disable writing workflow_graph.png on first iteration.",
     )
+    parser.add_argument(
+        "--stop-file",
+        default=".workflow-stop",
+        help="Path to a sentinel file that requests a graceful stop when created. Use an empty string to disable.",
+    )
+    parser.add_argument(
+        "--post-iteration-stop-wait-seconds",
+        type=float,
+        default=2.0,
+        help="Seconds to poll for a stop request after each completed iteration before starting the next one.",
+    )
     args = parser.parse_args()
 
     runtime_config = WorkflowRuntimeConfig(
@@ -536,6 +637,8 @@ def main():
         minikube_start_timeout=args.minikube_start_timeout,
         max_retries=args.max_retries,
         save_workflow_graph=args.save_workflow_graph,
+        stop_file=args.stop_file.strip() or None,
+        post_iteration_stop_wait_seconds=args.post_iteration_stop_wait_seconds,
     )
     asyncio.run(run_workflow(runtime_config))
 

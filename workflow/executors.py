@@ -469,9 +469,12 @@ async def run_pytest(task_with_val: TaskWithValidation, ctx: WorkflowContext[Tes
     """Run pytest directly without LLM - it's just command execution."""
     
     from agents.pytest_runner import run_pytest_command
+    from workflow.models import WorkflowStopRequested
     
     pytest_command = f"pytest --import-mode=importlib --rootdir=. {task_with_val.task_directory}/"
     result = run_pytest_command(pytest_command)
+    if result.get("interrupted"):
+        raise WorkflowStopRequested(f"Interrupted while running pytest for {task_with_val.task_id}")
     
     raw_output = ""
     if result.get("details") and len(result["details"]) > 0:
@@ -682,6 +685,7 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
     logging.info(f"\n[STEP] Running pytest with SKIP_ANSWER_TESTS=True for: {combined.test.task_id}")
     
     from agents.pytest_runner import run_pytest_command
+    from workflow.models import WorkflowStopRequested
     import os
     
     junit_path = _create_skip_answer_junit_path(combined.test.task_id)
@@ -693,6 +697,8 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
     try:
         pytest_command = _build_skip_answer_pytest_command(combined.test.task_directory, junit_path)
         result = run_pytest_command(pytest_command)
+        if result.get("interrupted"):
+            raise WorkflowStopRequested(f"Interrupted while running skip-answer pytest for {combined.test.task_id}")
         
         raw_output = result.get("details", [""])[0] if result.get("details") else ""
         test_05_failed, test_03_skipped = _detect_skip_answer_outcome(junit_path, raw_output)

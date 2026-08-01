@@ -114,12 +114,33 @@ python workflow.py \
   --max-retries 2 \
   --no-reset-minikube \
   --minikube-delete-timeout 120 \
-  --minikube-start-timeout 300
+  --minikube-start-timeout 300 \
+  --stop-file .workflow-stop
 ```
 
-Press `Ctrl+C` once to request a graceful stop: the workflow finishes the current task
-(including any retries, failure handling, or quarantine bookkeeping) and exits before
-starting the next task. Press `Ctrl+C` a second time to abort immediately.
+### Stopping the workflow safely
+
+The preferred stop mechanism is the **stop file**:
+
+```bash
+touch .workflow-stop
+```
+
+The runner polls this file between steps, and the pytest runner also watches it while tests
+are running. When the file appears, the workflow stops cleanly without classifying the
+in-progress concept as success or failure.
+
+`Ctrl+C` is still supported as a fallback:
+
+- first `Ctrl+C` requests the same graceful stop path
+- second `Ctrl+C` forces an immediate abort
+
+Interrupted tasks are handled specially:
+
+- the concept is removed from idea memory instead of being saved to success/failure memory
+- generated local artifacts are cleaned automatically
+- best-effort cluster cleanup runs for rendered runtime resources
+- newly created task directories are removed entirely; pre-existing task directories keep authored files and lose only generated artifacts
 
 ## Usage
 
@@ -131,8 +152,11 @@ source .venv/bin/activate
 # Run the full workflow (generates up to 80 tasks with retry loop)
 python workflow.py
 
-# Stop gracefully after the current task finishes
-# 1st Ctrl+C: finish current task, then exit
+# Preferred graceful stop
+touch .workflow-stop
+
+# Or use Ctrl+C
+# 1st Ctrl+C: request graceful stop + cleanup
 # 2nd Ctrl+C: abort immediately
 
 # Launch DevUI (interactive browser UI)
@@ -209,6 +233,7 @@ Each iteration:
 2. Generates a unique concept via the Idea Agent
 3. Runs the workflow with up to 3 fix attempts per task
 4. Tracks success/failure in memory files
+5. On interrupt, removes the in-progress concept from memory and cleans partial artifacts instead of classifying it
 
 ### Key Design Decisions
 
@@ -217,6 +242,8 @@ Each iteration:
 **Fail fast, no fallback**: The workflow and helper wrappers intentionally reject incomplete state and malformed prompts/outputs with explicit errors instead of assuming defaults. This keeps failures visible and prevents hidden drift.
 
 **No LLM for validation/testing**: Validation and test execution are deterministic operations. Using pure Python functions is faster, cheaper, and more reliable than routing through an LLM.
+
+**Interrupts are not failures**: User-requested stops do not move tasks to `unsuccessful/` and do not write success/failure memory. They use the interrupted-task cleanup path instead so folder truth and memory truth remain consistent.
 
 **Skip-answer validation**: After tests pass, an extra step runs pytest with `SKIP_ANSWER_TESTS=True` to confirm that `test_05_check.py` correctly fails when the answer isn't deployed. This catches tests that would pass regardless of the student's answer.
 

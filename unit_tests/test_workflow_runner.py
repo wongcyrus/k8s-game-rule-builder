@@ -77,25 +77,64 @@ def test_reset_minikube_skips_authoritative_kubeconfig(monkeypatch):
 
 def test_graceful_stop_controller_first_signal_interrupts_current_wait():
     controller = runner.GracefulStopController()
+    calls = []
 
-    import pytest
+    import agents.pytest_runner as pytest_runner
 
-    with pytest.raises(runner.GracefulStopController.GracefulStopRequested):
+    orig = pytest_runner.request_pytest_interrupt
+    try:
+        pytest_runner.request_pytest_interrupt = lambda: calls.append("interrupt")
         controller.request_stop(signal.SIGINT)
+    finally:
+        pytest_runner.request_pytest_interrupt = orig
 
     assert controller.stop_requested is True
+    assert calls == ["interrupt"]
 
 
 def test_graceful_stop_controller_second_signal_forces_keyboard_interrupt():
     controller = runner.GracefulStopController()
+    import agents.pytest_runner as pytest_runner
 
     import pytest
 
-    with pytest.raises(runner.GracefulStopController.GracefulStopRequested):
+    orig = pytest_runner.request_pytest_interrupt
+    try:
+        pytest_runner.request_pytest_interrupt = lambda: None
         controller.request_stop(signal.SIGINT)
+    finally:
+        pytest_runner.request_pytest_interrupt = orig
 
     with pytest.raises(KeyboardInterrupt, match="Forced workflow shutdown requested"):
         controller.request_stop(signal.SIGINT)
+
+
+def test_graceful_stop_controller_stop_file_requests_stop(monkeypatch, tmp_path):
+    stop_file = tmp_path / ".workflow-stop"
+    controller = runner.GracefulStopController(str(stop_file))
+    calls = []
+
+    import agents.pytest_runner as pytest_runner
+
+    orig = pytest_runner.request_pytest_interrupt
+    try:
+        pytest_runner.request_pytest_interrupt = lambda: calls.append("interrupt")
+        stop_file.write_text("", encoding="utf-8")
+        assert controller.stop_requested is True
+    finally:
+        pytest_runner.request_pytest_interrupt = orig
+
+    assert calls == ["interrupt"]
+
+
+def test_graceful_stop_controller_prepare_stop_file_removes_stale_file(tmp_path):
+    stop_file = tmp_path / ".workflow-stop"
+    stop_file.write_text("stale", encoding="utf-8")
+    controller = runner.GracefulStopController(str(stop_file))
+
+    controller.prepare_stop_file()
+
+    assert not stop_file.exists()
 
 
 def test_run_workflow_executes_with_mocked_dependencies(monkeypatch, tmp_path):
@@ -503,12 +542,16 @@ def test_run_workflow_stops_after_current_task_when_stop_requested(monkeypatch, 
         def __init__(self):
             self.generated_ideas = {}
             self.failed_concepts = {}
+            self.removed = []
 
         def add_structured_concept(self, concept):
             self.generated_ideas[concept.concept.lower()] = {"concept": concept.concept}
 
         def add_failed_concept(self, concept, reason):
             self.failed_concepts[concept.concept.lower()] = {"concept": concept.concept, "reason": reason}
+
+        def remove_concept(self, concept):
+            self.removed.append(concept)
 
     class _Var:
         task_id = "101_demo"
@@ -521,9 +564,13 @@ def test_run_workflow_stops_after_current_task_when_stop_requested(monkeypatch, 
         tags = ["batch"]
         variations = [_Var()]
 
+    memory_holder = {}
+
     async def fake_create_idea_agent_with_mcp(_tool):
         create_calls.append("idea")
-        return object(), FakeMemory()
+        mem = FakeMemory()
+        memory_holder["mem"] = mem
+        return object(), mem
 
     async def fake_generate_task_idea(_agent, _memory):
         return _Concept()
@@ -566,6 +613,10 @@ def test_run_workflow_stops_after_current_task_when_stop_requested(monkeypatch, 
         )
     )
     assert create_calls == ["idea"]
+    mem = memory_holder["mem"]
+    assert mem.generated_ideas == {}
+    assert mem.failed_concepts == {}
+    assert mem.removed == ["Jobs"]
 
 
 def test_run_workflow_returns_cleanly_after_graceful_stop_interrupt(monkeypatch, tmp_path):
