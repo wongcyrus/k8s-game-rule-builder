@@ -74,5 +74,7 @@ class InitialWorkflowState:
     objective: str
     retry_count: int = 0
     max_retries: int = 3
+    iteration_number: int = 1
+    workflow_started_at: str = ""
     stop_requested_callback: Callable[[], bool] | None = None
     task_dir_preexisting: bool = False

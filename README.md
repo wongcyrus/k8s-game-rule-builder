@@ -16,6 +16,7 @@ A Python project for building Kubernetes learning game rules using AI agents pow
 - **Iteration Crash Recovery**: Unexpected workflow execution errors are recorded in failure memory so later iterations can continue instead of aborting the full run
 - **Responses API Support**: Automatic model detection — uses Chat Completions or Responses API based on the configured deployment
 - **Skip-Answer Validation**: Extra validation step that confirms `test_05_check.py` fails when the answer is not deployed
+- **CSV Workflow Summary**: Appends per-task, per-phase rows to `reports/workflow_phase_summary.csv` with timestamps, attempts, status, and linked artifacts
 - **Comprehensive Logging**: Built-in middleware for debugging and monitoring
 
 ## Setup
@@ -182,6 +183,22 @@ setup.template.yaml, answer.template.yaml, and all test files.
 ```
 
 Adjust the task ID, topic, difficulty, and directory path to match your setup. The workflow will generate the files, validate them, run tests, and retry with the Fixer Agent if anything fails.
+
+### Workflow CSV Summary
+
+Each workflow phase appends a row to:
+
+```bash
+reports/workflow_phase_summary.csv
+```
+
+The CSV includes timestamps, iteration number, task ID, phase (`validation`, `pytest`,
+`skip_answer_pytest`, `workflow_complete`), attempt number, status, reason, and an
+artifact path when detailed output is archived. Detailed phase output is stored under:
+
+```bash
+reports/tasks/<task_id>/
+```
 
 ### Running Individual Agents
 

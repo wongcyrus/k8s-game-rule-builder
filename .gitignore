@@ -46,3 +46,4 @@ task_ideas_failure_memory.json
 .coverage
 *.bak-*
 memory-backups-**/**
+reports/

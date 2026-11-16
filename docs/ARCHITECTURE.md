@@ -83,6 +83,7 @@ Minikube is reset (delete + start) before each iteration.
 - **No fallback assumptions**: Executors require explicit state (`retry_count`, `max_retries`, validation state, failure reason state). Missing data raises explicit errors to avoid hidden drift.
 - **Skip-answer validation**: After tests pass, pytest runs again with `SKIP_ANSWER_TESTS=True` to confirm `test_05_check.py` fails when the answer isn't deployed.
 - **Failure reporting**: After max retries, the task is moved to `unsuccessful/<game_name>/` with a `FAILURE_REPORT.txt` containing failure reasons, session.json content, and raw test output.
+- **CSV phase reporting**: Every task phase appends a row to `reports/workflow_phase_summary.csv`; detailed phase output is archived under `reports/tasks/<task_id>/`.
 - **Interrupt-safe stop path**: User-requested stops do not classify the current concept into success or failure memory. Instead, the runner removes it from memory and cleans partial task artifacts.
 - **Preferred stop mechanism**: The primary stop path is a polled stop file (default `.workflow-stop`). `Ctrl+C` requests the same graceful stop path and only the second `Ctrl+C` hard-aborts.
 - **Interrupted task cleanup**: Generated artifacts such as `*.gen.yaml`, `test_result.txt`, `no_answer_test_result.txt`, `test_*.json`, and `__pycache__/` are removed. Newly created task directories are removed entirely; pre-existing task directories keep authored files and only lose generated artifacts.

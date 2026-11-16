@@ -164,3 +164,4 @@ asyncio.run(run_workflow())
 - **Interrupted Task Cleanup**: Partial local artifacts and best-effort runtime leftovers are cleaned on graceful stop
 - **Skip-Answer Validation**: Verifies `test_05_check.py` fails when `SKIP_ANSWER_TESTS=True` using JUnit XML result parsing
 - **Cluster-Aware Test Prompts**: Agent instructions now prefer `build_kube_config_from_input(json_input)` and skip optional CRD/controller checks when the API is not installed
+- **CSV Phase Summary**: Every validation/test/finalization step appends to `reports/workflow_phase_summary.csv`, with detailed phase artifacts archived under `reports/tasks/<task_id>/`

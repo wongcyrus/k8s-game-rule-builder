@@ -1,3 +1,4 @@
+import csv
 import signal
 from pathlib import Path
 
@@ -22,6 +23,12 @@ class _FakeStopController:
 
     def restore_signal_handlers(self):
         self.restored = True
+
+
+def _read_summary_rows(tmp_path: Path) -> list[dict[str, str]]:
+    summary_path = tmp_path / "reports/workflow_phase_summary.csv"
+    with open(summary_path, encoding="utf-8", newline="") as file:
+        return list(csv.DictReader(file))
 
 
 def test_reset_minikube_runs_delete_then_start(monkeypatch):
@@ -431,6 +438,10 @@ def test_run_workflow_unexpected_exception_saves_failed_concept_and_continues(mo
     assert "daemonsets" in memory.generated_ideas
     assert memory.saved_failures == 1
     assert memory.saved_successes == 1
+    rows = _read_summary_rows(tmp_path)
+    assert rows[0]["phase"] == "workflow_complete"
+    assert rows[0]["status"] == "execution_error"
+    assert rows[0]["task_id"] == "110_demo"
 
 
 def test_run_workflow_runs_preflight_once(monkeypatch, tmp_path):
@@ -617,6 +628,11 @@ def test_run_workflow_stops_after_current_task_when_stop_requested(monkeypatch, 
     assert mem.generated_ideas == {}
     assert mem.failed_concepts == {}
     assert mem.removed == ["Jobs"]
+    rows = _read_summary_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "101_demo"
+    assert rows[0]["status"] == "interrupted"
+    assert rows[0]["phase"] == "workflow_complete"
 
 
 def test_run_workflow_returns_cleanly_after_graceful_stop_interrupt(monkeypatch, tmp_path):

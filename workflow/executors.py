@@ -31,6 +31,7 @@ from workflow.preflight import (
     QuarantinedTaskError,
     run_k8s_preflight_check,
 )
+from workflow.reporting import archive_phase_output, append_workflow_phase_summary
 
 _MISSING = object()  # sentinel for get_state fallback detection
 
@@ -42,9 +43,65 @@ def _is_stop_requested(ctx: WorkflowContext) -> bool:
     return bool(callback())
 
 
+def _current_attempt(ctx: WorkflowContext) -> int:
+    retry_count = ctx.get_state("retry_count", 0)
+    return int(retry_count) + 1
+
+
+def _append_phase_summary(
+    ctx: WorkflowContext,
+    *,
+    task_id: str,
+    phase: str,
+    attempt: int | None,
+    status: str,
+    is_valid: bool | None,
+    reason: str,
+    task_directory: str,
+    target_topic: str = "",
+    difficulty: str = "",
+    artifact_path: str = "",
+) -> None:
+    append_workflow_phase_summary(
+        workflow_started_at=ctx.get_state("workflow_started_at", ""),
+        iteration=ctx.get_state("iteration_number", ""),
+        task_id=task_id,
+        target_topic=target_topic or ctx.get_state("target_topic", ""),
+        difficulty=difficulty or ctx.get_state("difficulty", ""),
+        phase=phase,
+        attempt=attempt,
+        status=status,
+        is_valid=is_valid,
+        reason=reason,
+        task_directory=task_directory,
+        artifact_path=artifact_path,
+        reports_base_dir=_reports_base_dir(),
+    )
+
+
 def _environment_failed_game_root() -> Path:
     unsuccessful_game_root = Path(PATHS.unsuccessful_game_root)
     return unsuccessful_game_root.parent.parent / "environment_failed" / unsuccessful_game_root.name
+
+
+def _reports_base_dir() -> Path:
+    pytest_rootdir = getattr(PATHS, "pytest_rootdir", None)
+    if pytest_rootdir is not None:
+        return Path(pytest_rootdir)
+
+    game_root = getattr(PATHS, "game_root", None)
+    if game_root is not None:
+        return Path(game_root).parents[1]
+
+    unsuccessful_game_root = getattr(PATHS, "unsuccessful_game_root", None)
+    if unsuccessful_game_root is not None:
+        return Path(unsuccessful_game_root).parents[1]
+
+    unsuccessful_root = getattr(PATHS, "unsuccessful_root", None)
+    if unsuccessful_root is not None:
+        return Path(unsuccessful_root).parent
+
+    return Path.cwd()
 
 
 def _destination_task_path(base_dir: Path, task_id: str) -> Path:
@@ -333,6 +390,8 @@ async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialW
         ctx.set_state("objective", message.objective)
         ctx.set_state("retry_count", message.retry_count)
         ctx.set_state("max_retries", message.max_retries)
+        ctx.set_state("iteration_number", message.iteration_number)
+        ctx.set_state("workflow_started_at", message.workflow_started_at)
         ctx.set_state("stop_requested_callback", message.stop_requested_callback)
         ctx.set_state("task_dir_preexisting", message.task_dir_preexisting)
         logging.info(f"Set state: task_id={message.task_id}, topic={message.target_topic}")
@@ -365,6 +424,8 @@ async def initialize_retry(message: str | dict | AgentExecutorRequest | InitialW
             ctx.set_state("objective", parsed_topic)
             ctx.set_state("retry_count", 0)
             ctx.set_state("max_retries", 3)
+            ctx.set_state("iteration_number", 1)
+            ctx.set_state("workflow_started_at", "")
             ctx.set_state("task_dir_preexisting", task_dir.exists())
             
             task_dir.mkdir(parents=True, exist_ok=True)
@@ -452,6 +513,17 @@ async def run_validation(task_info: TaskInfo, ctx: WorkflowContext[TaskWithValid
         task_id=task_info.task_id,
         task_directory=task_info.task_directory
     )
+
+    _append_phase_summary(
+        ctx,
+        task_id=validation.task_id,
+        phase="validation",
+        attempt=_current_attempt(ctx),
+        status="passed" if validation.is_valid else "failed",
+        is_valid=validation.is_valid,
+        reason=validation.reason,
+        task_directory=validation.task_directory,
+    )
     
     ctx.set_state(f"validation_{validation.task_id}", validation)
     
@@ -490,6 +562,26 @@ async def run_pytest(task_with_val: TaskWithValidation, ctx: WorkflowContext[Tes
         task_id=task_with_val.task_id,
         task_directory=task_with_val.task_directory,
         raw_output=raw_output
+    )
+
+    artifact_path = archive_phase_output(
+        task_id=test_result.task_id,
+        phase="pytest",
+        attempt=_current_attempt(ctx),
+        status="passed" if test_result.is_valid else "failed",
+        content=raw_output,
+        reports_base_dir=_reports_base_dir(),
+    )
+    _append_phase_summary(
+        ctx,
+        task_id=test_result.task_id,
+        phase="pytest",
+        attempt=_current_attempt(ctx),
+        status="passed" if test_result.is_valid else "failed",
+        is_valid=test_result.is_valid,
+        reason=test_result.reason,
+        task_directory=test_result.task_directory,
+        artifact_path=artifact_path,
     )
     
     await ctx.send_message(test_result)
@@ -702,13 +794,36 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
         
         raw_output = result.get("details", [""])[0] if result.get("details") else ""
         test_05_failed, test_03_skipped = _detect_skip_answer_outcome(junit_path, raw_output)
+        attempt = combined.retry_count + 1
         
         logging.info(f"test_03_answer.py skipped: {test_03_skipped}")
         logging.info(f"test_05_check.py failed: {test_05_failed}")
+
+        artifact_path = archive_phase_output(
+            task_id=combined.test.task_id,
+            phase="skip_answer_pytest",
+            attempt=attempt,
+            status="passed" if (test_03_skipped and test_05_failed) else "failed",
+            content=raw_output,
+            reports_base_dir=_reports_base_dir(),
+        )
         
         if test_03_skipped and test_05_failed:
             logging.info(
                 "✅ Validation passed: test_03_answer.py was skipped and test_05_check.py failed as expected"
+            )
+            _append_phase_summary(
+                ctx,
+                task_id=combined.test.task_id,
+                phase="skip_answer_pytest",
+                attempt=attempt,
+                status="passed",
+                is_valid=True,
+                reason="test_03_answer.py was skipped and test_05_check.py failed as expected",
+                task_directory=combined.test.task_directory,
+                target_topic=combined.target_topic,
+                difficulty=combined.difficulty,
+                artifact_path=artifact_path,
             )
             await ctx.send_message(combined)
         else:
@@ -745,6 +860,20 @@ async def run_pytest_skip_answer(combined: CombinedValidationResult, ctx: Workfl
                 difficulty=combined.difficulty,
                 objective=combined.objective,
             )
+
+            _append_phase_summary(
+                ctx,
+                task_id=combined.test.task_id,
+                phase="skip_answer_pytest",
+                attempt=attempt,
+                status="failed",
+                is_valid=False,
+                reason=failure_reason,
+                task_directory=combined.test.task_directory,
+                target_topic=combined.target_topic,
+                difficulty=combined.difficulty,
+                artifact_path=artifact_path,
+            )
             
             await ctx.send_message(updated_combined)
     
@@ -765,6 +894,18 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
     """Complete the workflow - either success or max retries reached."""
     logging.info("\n[STEP] 🏁 Completing workflow...")
     if combined.should_keep:
+        _append_phase_summary(
+            ctx,
+            task_id=combined.test.task_id,
+            phase="workflow_complete",
+            attempt=combined.retry_count + 1,
+            status="kept",
+            is_valid=True,
+            reason="Task passed validation, pytest, and skip-answer checks",
+            task_directory=combined.test.task_directory,
+            target_topic=combined.target_topic,
+            difficulty=combined.difficulty,
+        )
         await ctx.yield_output(f"🏁 Workflow complete: Task {combined.test.task_id} successfully generated")
     else:
         try:
@@ -795,6 +936,23 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
                     raw_test_output=raw_test_output,
                     connectivity_error=exc,
                 )
+
+            try:
+                _append_phase_summary(
+                    ctx,
+                    task_id=combined.test.task_id,
+                    phase="workflow_complete",
+                    attempt=combined.retry_count,
+                    status="quarantined",
+                    is_valid=False,
+                    reason=str(exc),
+                    task_directory=combined.test.task_directory,
+                    target_topic=combined.target_topic,
+                    difficulty=combined.difficulty,
+                    artifact_path=str(quarantine_task_path / "ENVIRONMENT_FAILURE_REPORT.txt"),
+                )
+            except Exception:
+                logging.exception("Failed to record quarantine summary for %s", combined.test.task_id)
 
             raise QuarantinedTaskError(
                 task_id=combined.test.task_id,
@@ -871,5 +1029,19 @@ async def complete_workflow(combined: CombinedValidationResult, ctx: WorkflowCon
                     f.write(f"{'='*80}\n")
             
             logging.info(f"Saved failure report to: {failure_report_path}")
+
+            _append_phase_summary(
+                ctx,
+                task_id=combined.test.task_id,
+                phase="workflow_complete",
+                attempt=combined.retry_count,
+                status="failed",
+                is_valid=False,
+                reason=combined.test.reason,
+                task_directory=combined.test.task_directory,
+                target_topic=combined.target_topic,
+                difficulty=combined.difficulty,
+                artifact_path=str(failure_report_path),
+            )
         
         await ctx.yield_output(f"🏁 Workflow complete: Failed to generate valid task after {combined.retry_count} retries. Task moved to unsuccessful folder.")

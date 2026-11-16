@@ -9,7 +9,9 @@ import signal
 import shutil
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import current_thread, main_thread
 
@@ -30,6 +32,7 @@ from workflow.preflight import (
     run_k8s_preflight_check,
     should_manage_minikube,
 )
+from workflow.reporting import archive_phase_output, append_workflow_phase_summary
 
 
 logging.basicConfig(
@@ -326,6 +329,27 @@ def _cleanup_interrupted_task(*, task_id: str, task_dir: Path, task_dir_preexist
     _cleanup_interrupted_local_artifacts(task_dir, task_dir_preexisting=task_dir_preexisting)
 
 
+def _reports_base_dir() -> Path:
+    pytest_rootdir = getattr(PATHS, "pytest_rootdir", None)
+    if pytest_rootdir is not None:
+        return Path(pytest_rootdir)
+
+    game_root = getattr(PATHS, "game_root", None)
+    if game_root is not None:
+        return Path(game_root).parents[1]
+
+    tests_root = getattr(PATHS, "tests_root", None)
+    if tests_root is not None:
+        return Path(tests_root).parent
+
+    return Path.cwd()
+
+
+def _task_directory_string(task_id: str) -> str:
+    game_name = getattr(PATHS, "game_name", Path(PATHS.game_root).name)
+    return f"tests/{game_name}/{task_id}"
+
+
 async def _wait_for_post_iteration_stop_window(stop_controller, seconds: float) -> bool:
     if hasattr(stop_controller, "wait_for_post_iteration_stop_window"):
         return await stop_controller.wait_for_post_iteration_stop_window(seconds)
@@ -363,6 +387,7 @@ async def run_workflow(
     logging.info("="*80)
     logging.info("K8S TASK GENERATION WORKFLOW")
     logging.info("="*80)
+    workflow_started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     
     
     # Create MCP tools
@@ -478,6 +503,8 @@ async def run_workflow(
                     objective=beginner_task.objective,
                     retry_count=0,
                     max_retries=config.max_retries,
+                    iteration_number=iteration + 1,
+                    workflow_started_at=workflow_started_at,
                     stop_requested_callback=lambda: stop_controller.stop_requested,
                     task_dir_preexisting=task_dir_preexisting,
                 )
@@ -509,12 +536,49 @@ async def run_workflow(
                         "Workflow interrupted for concept %s. Removed it from memory and stopped cleanly.",
                         concept.concept,
                     )
+                    append_workflow_phase_summary(
+                        workflow_started_at=workflow_started_at,
+                        iteration=iteration + 1,
+                        task_id=task_id,
+                        target_topic=target_topic,
+                        difficulty=beginner_task.difficulty,
+                        phase="workflow_complete",
+                        attempt=None,
+                        status="interrupted",
+                        is_valid=None,
+                        reason="Workflow stopped gracefully before task completion",
+                        task_directory=_task_directory_string(task_id),
+                        reports_base_dir=_reports_base_dir(),
+                    )
                     break
                 except Exception as exc:
                     # Task-level workflow crashes are real failures for this concept, not
                     # environment invalidations, so persist them and continue iterating.
                     reason = f"Workflow execution error: {type(exc).__name__}: {exc}"
                     idea_memory.add_failed_concept(concept, reason=reason)
+                    artifact_path = archive_phase_output(
+                        task_id=task_id,
+                        phase="workflow_complete",
+                        attempt=None,
+                        status="execution_error",
+                        content="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                        reports_base_dir=_reports_base_dir(),
+                    )
+                    append_workflow_phase_summary(
+                        workflow_started_at=workflow_started_at,
+                        iteration=iteration + 1,
+                        task_id=task_id,
+                        target_topic=target_topic,
+                        difficulty=beginner_task.difficulty,
+                        phase="workflow_complete",
+                        attempt=None,
+                        status="execution_error",
+                        is_valid=False,
+                        reason=reason,
+                        task_directory=_task_directory_string(task_id),
+                        artifact_path=artifact_path,
+                        reports_base_dir=_reports_base_dir(),
+                    )
                     logging.exception(
                         "Workflow crashed for concept %s. Saved it to failure memory.",
                         concept.concept,
@@ -547,6 +611,20 @@ async def run_workflow(
                     logging.info(
                         "Workflow stop was requested during concept %s. Removed it from memory and exited cleanly.",
                         concept.concept,
+                    )
+                    append_workflow_phase_summary(
+                        workflow_started_at=workflow_started_at,
+                        iteration=iteration + 1,
+                        task_id=task_id,
+                        target_topic=target_topic,
+                        difficulty=beginner_task.difficulty,
+                        phase="workflow_complete",
+                        attempt=None,
+                        status="interrupted",
+                        is_valid=None,
+                        reason="Workflow stopped gracefully before task completion",
+                        task_directory=_task_directory_string(task_id),
+                        reports_base_dir=_reports_base_dir(),
                     )
                     break
 

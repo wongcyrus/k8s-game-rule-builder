@@ -5,6 +5,31 @@ from types import SimpleNamespace
 import agents.pytest_runner as pytest_runner
 
 
+class _FakePopen:
+    def __init__(self, cmd_list, *, returncode: int, captured: dict | None = None, cwd: str | None = None):
+        self.cmd_list = cmd_list
+        self.returncode = returncode
+        self.pid = 1234
+        if captured is not None:
+            captured["cmd_list"] = cmd_list
+            captured["cwd"] = cwd
+
+    def poll(self):
+        return self.returncode
+
+
+def _patch_popen(monkeypatch, *, returncode: int, stdout: str, stderr: str, captured: dict | None = None):
+    def fake_popen(cmd_list, stdout, stderr, text, cwd, start_new_session):
+        return _FakePopen(cmd_list, returncode=returncode, captured=captured, cwd=cwd)
+
+    monkeypatch.setattr(pytest_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        pytest_runner,
+        "_communicate_with_interrupt",
+        lambda _process: (stdout, stderr, False),
+    )
+
+
 class _SubprocessResult:
     def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
         self.returncode = returncode
@@ -36,13 +61,8 @@ def test_extract_task_dir_returns_none_for_non_matching_command():
 def test_run_pytest_command_success_saves_result_file(monkeypatch, tmp_path: Path):
     captured = {}
 
-    def fake_run(cmd_list, capture_output, text, check, cwd):
-        captured["cmd_list"] = cmd_list
-        captured["cwd"] = cwd
-        return _SubprocessResult(returncode=0, stdout="PASS", stderr="")
-
     monkeypatch.setattr(pytest_runner, "PATHS", SimpleNamespace(pytest_rootdir=tmp_path))
-    monkeypatch.setattr(pytest_runner.subprocess, "run", fake_run)
+    _patch_popen(monkeypatch, returncode=0, stdout="PASS", stderr="", captured=captured)
 
     result = pytest_runner.run_pytest_command(
         "pytest --import-mode=importlib --rootdir=. tests/game02/002_create_namespace/"
@@ -59,11 +79,8 @@ def test_run_pytest_command_success_saves_result_file(monkeypatch, tmp_path: Pat
 
 
 def test_run_pytest_command_skip_answer_uses_no_answer_filename(monkeypatch, tmp_path: Path):
-    def fake_run(*args, **kwargs):
-        return _SubprocessResult(returncode=0, stdout="PASS", stderr="")
-
     monkeypatch.setattr(pytest_runner, "PATHS", SimpleNamespace(pytest_rootdir=tmp_path))
-    monkeypatch.setattr(pytest_runner.subprocess, "run", fake_run)
+    _patch_popen(monkeypatch, returncode=0, stdout="PASS", stderr="")
     monkeypatch.setenv("SKIP_ANSWER_TESTS", "True")
 
     result = pytest_runner.run_pytest_command(
@@ -76,11 +93,8 @@ def test_run_pytest_command_skip_answer_uses_no_answer_filename(monkeypatch, tmp
 
 
 def test_run_pytest_command_no_tests_collected(monkeypatch, tmp_path: Path):
-    def fake_run(*args, **kwargs):
-        return _SubprocessResult(returncode=5, stdout="", stderr="no tests collected")
-
     monkeypatch.setattr(pytest_runner, "PATHS", SimpleNamespace(pytest_rootdir=tmp_path))
-    monkeypatch.setattr(pytest_runner.subprocess, "run", fake_run)
+    _patch_popen(monkeypatch, returncode=5, stdout="", stderr="no tests collected")
 
     result = pytest_runner.run_pytest_command("pytest tests/game02/004_task/")
 
@@ -89,11 +103,8 @@ def test_run_pytest_command_no_tests_collected(monkeypatch, tmp_path: Path):
 
 
 def test_run_pytest_command_returns_failed_for_nonzero_exit(monkeypatch, tmp_path: Path):
-    def fake_run(*args, **kwargs):
-        return _SubprocessResult(returncode=1, stdout="", stderr="failed")
-
     monkeypatch.setattr(pytest_runner, "PATHS", SimpleNamespace(pytest_rootdir=tmp_path))
-    monkeypatch.setattr(pytest_runner.subprocess, "run", fake_run)
+    _patch_popen(monkeypatch, returncode=1, stdout="", stderr="failed")
 
     result = pytest_runner.run_pytest_command("pytest tests/game02/004_task/")
     assert result["is_valid"] is False
@@ -108,14 +119,11 @@ def test_run_pytest_command_invalid_shell_syntax(monkeypatch, tmp_path: Path):
 
 
 def test_run_pytest_command_handles_save_output_oserror(monkeypatch, tmp_path: Path):
-    def fake_run(*args, **kwargs):
-        return _SubprocessResult(returncode=0, stdout="ok", stderr="")
-
     def fake_save(*args, **kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr(pytest_runner, "PATHS", SimpleNamespace(pytest_rootdir=tmp_path))
-    monkeypatch.setattr(pytest_runner.subprocess, "run", fake_run)
+    _patch_popen(monkeypatch, returncode=0, stdout="ok", stderr="")
     monkeypatch.setattr(pytest_runner, "_save_test_output", fake_save)
 
     result = pytest_runner.run_pytest_command("pytest tests/game02/005_task/")

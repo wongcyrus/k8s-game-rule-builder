@@ -1,4 +1,5 @@
 import asyncio
+import csv
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,12 @@ def _combined(task_id: str = "050_demo", retry_count: int = 0, max_retries: int 
 
 def _call_executor(fn, *args):
     return asyncio.run(fn._original_func(*args))
+
+
+def _read_summary_rows(tmp_path: Path) -> list[dict[str, str]]:
+    summary_path = tmp_path / "reports/workflow_phase_summary.csv"
+    with open(summary_path, encoding="utf-8", newline="") as file:
+        return list(csv.DictReader(file))
 
 
 def test_initialize_retry_with_initial_state_creates_task_dir_and_sends_request(monkeypatch, tmp_path: Path):
@@ -131,6 +138,37 @@ def test_make_decision_success_when_state_present():
     assert ctx.sent[0].test.task_id == "052_demo"
 
 
+def test_run_validation_writes_csv_summary(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(
+        executors,
+        "PATHS",
+        SimpleNamespace(game_root=tmp_path / "tests/game02", pytest_rootdir=tmp_path),
+    )
+    monkeypatch.setattr(
+        "agents.k8s_task_validator.validate_task_directory",
+        lambda _task_id: {"is_valid": True, "reason": "ok", "details": []},
+    )
+    ctx = _FakeCtx()
+    ctx.set_state("retry_count", 0)
+    ctx.set_state("iteration_number", 4)
+    ctx.set_state("workflow_started_at", "2026-08-01T04:00:00+00:00")
+    ctx.set_state("target_topic", "Pods")
+    ctx.set_state("difficulty", "BEGINNER")
+
+    _call_executor(
+        executors.run_validation,
+        executors.TaskInfo(task_id="052b_demo", task_directory="tests/game02/052b_demo"),
+        ctx,
+    )
+
+    rows = _read_summary_rows(tmp_path)
+    assert rows[0]["phase"] == "validation"
+    assert rows[0]["task_id"] == "052b_demo"
+    assert rows[0]["status"] == "passed"
+    assert rows[0]["attempt"] == "1"
+    assert rows[0]["iteration"] == "4"
+
+
 def test_remove_task_increments_retry_and_sets_failure_reasons():
     ctx = _FakeCtx()
     combined = _combined(task_id="053_demo", retry_count=1, max_retries=3)
@@ -179,6 +217,47 @@ def test_run_pytest_skip_answer_marks_failure_when_check_does_not_fail(monkeypat
     assert "test_05_check.py did not fail" in updated.test.reason
 
 
+def test_run_pytest_writes_csv_summary_and_output_artifact(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(executors, "PATHS", SimpleNamespace(pytest_rootdir=tmp_path))
+    ctx = _FakeCtx()
+    ctx.set_state("retry_count", 1)
+    ctx.set_state("iteration_number", 7)
+    ctx.set_state("workflow_started_at", "2026-08-01T05:00:00+00:00")
+    ctx.set_state("target_topic", "Deployments")
+    ctx.set_state("difficulty", "BEGINNER")
+
+    import agents.pytest_runner as pytest_runner
+
+    monkeypatch.setattr(
+        pytest_runner,
+        "run_pytest_command",
+        lambda _cmd: {"is_valid": True, "reason": "All tests passed", "details": ["PYTEST RAW OUTPUT"]},
+    )
+
+    _call_executor(
+        executors.run_pytest,
+        executors.TaskWithValidation(
+            task_id="054c_demo",
+            task_directory="tests/game02/054c_demo",
+            validation=ValidationResult(
+                is_valid=True,
+                reason="ok",
+                task_id="054c_demo",
+                task_directory="tests/game02/054c_demo",
+            ),
+        ),
+        ctx,
+    )
+
+    rows = _read_summary_rows(tmp_path)
+    assert rows[0]["phase"] == "pytest"
+    assert rows[0]["attempt"] == "2"
+    assert rows[0]["status"] == "passed"
+    artifact_path = tmp_path / rows[0]["artifact_path"]
+    assert artifact_path.exists()
+    assert "PYTEST RAW OUTPUT" in artifact_path.read_text(encoding="utf-8")
+
+
 def test_run_pytest_skip_answer_marks_failure_when_answer_was_not_skipped(monkeypatch):
     ctx = _FakeCtx()
     combined = _combined(task_id="054b_demo", retry_count=0, max_retries=2)
@@ -205,6 +284,34 @@ def test_run_pytest_skip_answer_marks_failure_when_answer_was_not_skipped(monkey
     assert "failure_reasons_054b_demo" in ctx.state
 
 
+def test_run_pytest_skip_answer_writes_csv_summary(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(executors, "PATHS", SimpleNamespace(pytest_rootdir=tmp_path))
+    ctx = _FakeCtx()
+    ctx.set_state("iteration_number", 8)
+    ctx.set_state("workflow_started_at", "2026-08-01T06:00:00+00:00")
+    combined = _combined(task_id="054d_demo", retry_count=1, max_retries=3)
+
+    import agents.pytest_runner as pytest_runner
+
+    monkeypatch.setattr(
+        pytest_runner,
+        "run_pytest_command",
+        lambda _cmd: {
+            "is_valid": True,
+            "reason": "skip answer behaved",
+            "details": ["test_03_answer.py SKIPPED\ntest_05_check.py FAILED"],
+        },
+    )
+    monkeypatch.setattr(executors, "_parse_skip_answer_junit", lambda _path: (True, True))
+
+    _call_executor(executors.run_pytest_skip_answer, combined, ctx)
+
+    rows = _read_summary_rows(tmp_path)
+    assert rows[0]["phase"] == "skip_answer_pytest"
+    assert rows[0]["attempt"] == "2"
+    assert rows[0]["status"] == "passed"
+
+
 def test_complete_workflow_failure_moves_task_and_writes_report(monkeypatch, tmp_path: Path):
     game_root = tmp_path / "tests/game02"
     unsuccessful_root = tmp_path / "unsuccessful/game02"
@@ -216,7 +323,7 @@ def test_complete_workflow_failure_moves_task_and_writes_report(monkeypatch, tmp
     monkeypatch.setattr(
         executors,
         "PATHS",
-        SimpleNamespace(game_root=game_root, unsuccessful_game_root=unsuccessful_root),
+        SimpleNamespace(game_root=game_root, unsuccessful_game_root=unsuccessful_root, pytest_rootdir=tmp_path),
     )
     monkeypatch.setattr(executors, "run_k8s_preflight_check", lambda: "namespace/default")
 
@@ -232,6 +339,10 @@ def test_complete_workflow_failure_moves_task_and_writes_report(monkeypatch, tmp
     report = (moved_dir / "FAILURE_REPORT.txt").read_text(encoding="utf-8")
     assert "Task ID: 055_demo" in report
     assert "pytest output" in report
+    rows = _read_summary_rows(tmp_path)
+    assert rows[0]["phase"] == "workflow_complete"
+    assert rows[0]["status"] == "failed"
+    assert "FAILURE_REPORT.txt" in rows[0]["artifact_path"]
     assert "Workflow complete: Failed to generate valid task" in ctx.outputs[0]
 
 
@@ -558,3 +669,30 @@ def test_complete_workflow_quarantines_task_on_k8s_failure(monkeypatch, tmp_path
     assert "Kubernetes environment failure" in report
     assert "kubectl get namespaces" in report
     assert not (unsuccessful_root / task_id).exists()
+
+
+def test_quarantine_summary_failure_preserves_environment_error(monkeypatch, tmp_path: Path, caplog):
+    task_id = "076_demo"
+    game_root = tmp_path / "tests/game02"
+    (game_root / task_id).mkdir(parents=True)
+    monkeypatch.setattr(
+        executors,
+        "PATHS",
+        SimpleNamespace(game_root=game_root, unsuccessful_game_root=tmp_path / "unsuccessful/game02"),
+    )
+    monkeypatch.setattr(
+        executors,
+        "run_k8s_preflight_check",
+        lambda: (_ for _ in ()).throw(K8sConnectivityError("k8s down", "kubectl get namespaces", "boom")),
+    )
+    monkeypatch.setattr(
+        executors,
+        "_append_phase_summary",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(QuarantinedTaskError) as error:
+        _call_executor(executors.complete_workflow, _combined(task_id, retry_count=3), _FakeCtx())
+
+    assert error.value.quarantine_path == tmp_path / "environment_failed/game02" / task_id
+    assert "Failed to record quarantine summary" in caplog.text
